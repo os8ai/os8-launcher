@@ -1,6 +1,8 @@
 name: nim
 install_type: container
-image: nvcr.io/nim/meta/llama-3.1-8b-instruct:latest
+# NIM images are model-specific. The actual image comes from the model's
+# nim_image field in config.yaml at runtime (e.g., nvcr.io/nim/nvidia/...).
+image: "{nim_image}"
 port: 8000
-run: "docker run --gpus all -p {port}:8000 -v {model_path}:/models {image}"
-update: "docker pull {image}"
+run: "docker run --gpus all -p {port}:8000 -v {model_path}:/opt/nim/.cache -e NGC_API_KEY={ngc_api_key} {nim_image}"
+update: "docker pull {nim_image}"

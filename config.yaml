@@ -1,6 +1,7 @@
 models:
   nemotron-3-super-120b:
     source: nvidia/Nemotron-3-Super-120B-A12B-NVFP4
+    nim_image: nvcr.io/nim/nvidia/nemotron-3-super-120b-a12b-nvfp4:latest
     path: models/nemotron-3-super-120b/weights
     format: nvfp4
     backends: [nim, vllm]

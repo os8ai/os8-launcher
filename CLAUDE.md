@@ -33,7 +33,8 @@ NVIDIA DGX Spark — GB10 GPU, 128GB unified memory, 3.7TB NVMe, Ubuntu 24.04 aa
 ## Current State
 
 - Phase 1 (Foundation) is complete — skeleton, config parser, CLI with stubs
-- Next step: Phase 2 (tool & model management — installer, preflight checks, model downloads)
+- Phase 2 (Tool & Model Management) is complete — installer, preflight checks, credentials, model management
+- Next step: Phase 3 (Runtime — backend lifecycle, client launcher, process management)
 
 ## Build Sequence (Milestone 1)
 

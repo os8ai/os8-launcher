@@ -29,6 +29,7 @@ class ModelConfig:
     backends: list[str]
     default_backend: str
     downloaded: bool
+    nim_image: str | None = None
 
 
 @dataclass
@@ -119,6 +120,7 @@ def _parse_models(raw: dict) -> dict[str, ModelConfig]:
             backends=data["backends"],
             default_backend=data["default_backend"],
             downloaded=data.get("downloaded", False),
+            nim_image=data.get("nim_image"),
         )
     return models
 
@@ -237,6 +239,8 @@ def format_config(config: Config) -> str:
         lines.append(f"    path:     {m.path}")
         lines.append(f"    status:   {status}")
         lines.append(f"    backends: {', '.join(m.backends)} (default: {m.default_backend})")
+        if m.nim_image:
+            lines.append(f"    nim_image: {m.nim_image}")
 
     lines.append("")
     lines.append("Backends:")

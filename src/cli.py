@@ -32,22 +32,29 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser = subparsers.add_parser("setup", help="Install backends and clients")
     setup_parser.add_argument("tool", nargs="?", help="Tool to install (or --all)")
     setup_parser.add_argument("--all", action="store_true", help="Install everything")
-    setup_parser.set_defaults(handler=_stub(2, "Tool installation"))
+    setup_parser.set_defaults(handler="setup")
+
+    # --- update ---
+    update_parser = subparsers.add_parser("update", help="Update backends and clients")
+    update_parser.add_argument("tool", nargs="?", help="Tool to update (or --all)")
+    update_parser.add_argument("--all", action="store_true", help="Update everything")
+    update_parser.set_defaults(handler="update")
 
     # --- models ---
     models_parser = subparsers.add_parser("models", help="Manage model weights")
     models_sub = models_parser.add_subparsers(dest="models_command")
 
     models_list = models_sub.add_parser("list", help="List available models")
-    models_list.set_defaults(handler=_stub(2, "Model listing"))
+    models_list.set_defaults(handler="models_list")
 
     models_download = models_sub.add_parser("download", help="Download model weights")
     models_download.add_argument("model", help="Model to download")
-    models_download.set_defaults(handler=_stub(2, "Model download"))
+    models_download.add_argument("--backend", help="Backend to download for (determines download strategy)")
+    models_download.set_defaults(handler="models_download")
 
     models_remove = models_sub.add_parser("remove", help="Remove model weights")
     models_remove.add_argument("model", help="Model to remove")
-    models_remove.set_defaults(handler=_stub(2, "Model removal"))
+    models_remove.set_defaults(handler="models_remove")
 
     models_parser.set_defaults(handler="models_help", _parser=models_parser)
 
@@ -83,13 +90,15 @@ def main(repo_root: Path):
 
     handler = args.handler
 
-    # String handlers need special treatment
+    # --- help handlers for subcommand groups ---
     if handler == "config_help":
         args._parser.print_help()
         return
     if handler == "models_help":
         args._parser.print_help()
         return
+
+    # --- config show ---
     if handler == "config_show":
         try:
             config = load_config(repo_root)
@@ -99,5 +108,77 @@ def main(repo_root: Path):
             sys.exit(1)
         return
 
-    # Callable stub handlers
-    handler(args)
+    # --- setup ---
+    if handler == "setup":
+        from src.installer import setup_tool, setup_all, InstallError
+        try:
+            config = load_config(repo_root)
+            if getattr(args, "all", False):
+                setup_all(config, repo_root)
+            elif args.tool:
+                setup_tool(args.tool, config, repo_root)
+            else:
+                print("Specify a tool to install, or use --all.")
+                print("Available tools:", ", ".join(
+                    list(config.backends.keys())
+                    + [n for n, c in config.clients.items() if c.type != "bridge"]
+                ))
+                sys.exit(1)
+        except (ConfigError, InstallError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- update ---
+    if handler == "update":
+        from src.installer import update_tool, update_all, InstallError
+        try:
+            config = load_config(repo_root)
+            if getattr(args, "all", False):
+                update_all(config, repo_root)
+            elif args.tool:
+                update_tool(args.tool, config, repo_root)
+            else:
+                print("Specify a tool to update, or use --all.")
+                sys.exit(1)
+        except (ConfigError, InstallError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- models list ---
+    if handler == "models_list":
+        from src.models import list_models
+        try:
+            config = load_config(repo_root)
+            list_models(config, repo_root)
+        except ConfigError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- models download ---
+    if handler == "models_download":
+        from src.models import download_model, ModelError
+        try:
+            config = load_config(repo_root)
+            download_model(args.model, config, repo_root, backend=args.backend)
+        except (ConfigError, ModelError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- models remove ---
+    if handler == "models_remove":
+        from src.models import remove_model, ModelError
+        try:
+            config = load_config(repo_root)
+            remove_model(args.model, config, repo_root)
+        except (ConfigError, ModelError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- callable stub handlers (Phase 3+) ---
+    if callable(handler):
+        handler(args)
