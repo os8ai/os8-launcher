@@ -1,0 +1,25 @@
+# Model weights (large files)
+models/*/weights/
+
+# Python virtual environments
+serving/*/venv/
+clients/*/venv/
+
+# Downloaded binaries
+serving/*/bin/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Project venv
+.venv/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/

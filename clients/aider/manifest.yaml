@@ -1,0 +1,6 @@
+name: aider
+install_type: pip
+package: aider-chat
+venv: clients/aider/venv
+run: "aider --openai-api-base http://localhost:{port}/v1"
+update: "pip install --upgrade aider-chat"

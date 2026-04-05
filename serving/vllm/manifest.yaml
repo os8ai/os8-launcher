@@ -1,0 +1,6 @@
+name: vllm
+install_type: pip
+package: vllm
+venv: serving/vllm/venv
+run: "python -m vllm.entrypoints.openai.api_server --model {model_path} --port {port}"
+update: "pip install --upgrade vllm"

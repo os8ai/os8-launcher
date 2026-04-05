@@ -32,9 +32,8 @@ NVIDIA DGX Spark — GB10 GPU, 128GB unified memory, 3.7TB NVMe, Ubuntu 24.04 aa
 
 ## Current State
 
-- VISION.md is complete
-- No code written yet
-- Next step: Milestone 1, build sequence step 1 (project skeleton, directory structure, config.yaml, launcher CLI entry point, Python package setup)
+- Phase 1 (Foundation) is complete — skeleton, config parser, CLI with stubs
+- Next step: Phase 2 (tool & model management — installer, preflight checks, model downloads)
 
 ## Build Sequence (Milestone 1)
 

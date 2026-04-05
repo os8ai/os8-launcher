@@ -1,0 +1,8 @@
+[project]
+name = "os8-launcher"
+version = "0.1.0"
+description = "A unified system for running local open-source AI models"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml",
+]

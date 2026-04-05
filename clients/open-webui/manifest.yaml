@@ -1,0 +1,6 @@
+name: open-webui
+install_type: container
+image: ghcr.io/open-webui/open-webui:main
+port: 3000
+run: "docker run -p {port}:8080 -e OPENAI_API_BASE_URL=http://host.docker.internal:{backend_port}/v1 {image}"
+update: "docker pull {image}"

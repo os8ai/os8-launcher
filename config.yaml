@@ -1,0 +1,29 @@
+models:
+  nemotron-3-super-120b:
+    source: nvidia/Nemotron-3-Super-120B-A12B-NVFP4
+    path: models/nemotron-3-super-120b/weights
+    format: nvfp4
+    backends: [nim, vllm]
+    default_backend: nim
+    downloaded: false
+
+backends:
+  nim:
+    manifest: serving/nim/manifest.yaml
+    port: 8000
+  vllm:
+    manifest: serving/vllm/manifest.yaml
+    port: 8000
+  llamacpp:
+    manifest: serving/llamacpp/manifest.yaml
+    port: 8080
+
+clients:
+  aider:
+    manifest: clients/aider/manifest.yaml
+  open-webui:
+    manifest: clients/open-webui/manifest.yaml
+    port: 3000
+  os8:
+    type: bridge
+    port: 8000

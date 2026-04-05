@@ -1,0 +1,3 @@
+name: os8
+install_type: bridge
+description: "OS8 connects to the serving backend's OpenAI-compatible API directly"

@@ -1,0 +1,6 @@
+name: nim
+install_type: container
+image: nvcr.io/nim/meta/llama-3.1-8b-instruct:latest
+port: 8000
+run: "docker run --gpus all -p {port}:8000 -v {model_path}:/models {image}"
+update: "docker pull {image}"
