@@ -1,6 +1,6 @@
 name: vllm
-install_type: pip
-package: vllm
-venv: serving/vllm/venv
-run: "python -m vllm.entrypoints.openai.api_server --model {model_path} --port {port}"
-update: "pip install --upgrade vllm"
+install_type: container
+image: vllm/vllm-openai:cu130-nightly
+port: 8000
+run: "docker run --gpus all --ipc=host -p {port}:8000 -v {model_path}:/model -e VLLM_NVFP4_GEMM_BACKEND=marlin -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 -e VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm -e VLLM_USE_FLASHINFER_MOE_FP4=0 {image} --model /model --max-model-len 32768 --trust-remote-code"
+update: "docker pull vllm/vllm-openai:cu130-nightly"

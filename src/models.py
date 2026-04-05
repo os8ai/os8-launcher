@@ -119,10 +119,14 @@ def _download_nim(model: ModelConfig, weights_path: Path):
             f"Add nim_image to the model entry in config.yaml."
         )
 
-    # Preflight
+    # Preflight — check disk space at repo root (weights dir may not exist yet)
+    disk_check_path = weights_path
+    while not disk_check_path.exists() and disk_check_path != disk_check_path.parent:
+        disk_check_path = disk_check_path.parent
+
     checks = [
         ("Docker", check_docker()),
-        ("Disk space", check_disk_space(str(weights_path.parent), required_gb=100)),
+        ("Disk space", check_disk_space(str(disk_check_path), required_gb=100)),
     ]
     if not run_checks(checks):
         raise ModelError("Prerequisites not met.")
@@ -173,9 +177,13 @@ def _download_huggingface(model: ModelConfig, weights_path: Path):
     """Download model weights from HuggingFace."""
     from huggingface_hub import snapshot_download
 
-    # Preflight — estimate ~75GB for a 120B model
+    # Preflight — check disk space at an existing ancestor path
+    disk_check_path = weights_path
+    while not disk_check_path.exists() and disk_check_path != disk_check_path.parent:
+        disk_check_path = disk_check_path.parent
+
     checks = [
-        ("Disk space", check_disk_space(str(weights_path.parent), required_gb=75)),
+        ("Disk space", check_disk_space(str(disk_check_path), required_gb=75)),
     ]
     if not run_checks(checks):
         raise ModelError("Prerequisites not met.")

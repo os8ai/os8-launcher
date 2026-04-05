@@ -2,6 +2,7 @@ const API = '/api';
 const POLL_INTERVAL = 3000;
 
 let modelsData = [];
+let toolsData = [];
 let statusData = { backend: null, clients: {} };
 let lastLogCount = 0;
 
@@ -30,8 +31,10 @@ async function pollStatus() {
 
 async function pollTools() {
     try {
-        const tools = await fetchJSON('/tools');
-        renderTools(tools);
+        toolsData = await fetchJSON('/tools');
+        renderBackends(toolsData.filter(t => t.kind === 'backend'));
+        renderClients(toolsData.filter(t => t.kind === 'client'));
+        renderClientSelect(toolsData);
     } catch (e) { /* ignore poll errors */ }
 }
 
@@ -47,6 +50,7 @@ async function pollLogs() {
 async function startServe() {
     const model = document.getElementById('model-select').value;
     const backend = document.getElementById('backend-select').value;
+    const client = document.getElementById('client-select').value;
     if (!model) return;
 
     await fetch(API + '/serve', {
@@ -54,8 +58,34 @@ async function startServe() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model, backend: backend || null }),
     });
+
+    // If a container client was selected, launch it after a delay (backend needs to start)
+    if (client) {
+        const tool = toolsData.find(t => t.name === client);
+        if (tool && tool.install_type === 'container') {
+            // Poll until backend is healthy, then start client
+            setTimeout(() => launchClientWhenReady(client), 2000);
+        }
+    }
+
     setTimeout(pollStatus, 500);
     setTimeout(pollLogs, 500);
+}
+
+async function launchClientWhenReady(name) {
+    // Check if backend is running yet
+    try {
+        const status = await fetchJSON('/status');
+        if (status.backend && status.backend.health === 'healthy') {
+            await fetch(API + `/clients/${name}`, { method: 'POST' });
+            setTimeout(pollStatus, 500);
+        } else {
+            // Not ready yet, try again
+            setTimeout(() => launchClientWhenReady(name), 3000);
+        }
+    } catch (e) {
+        setTimeout(() => launchClientWhenReady(name), 3000);
+    }
 }
 
 async function stopServe() {
@@ -65,7 +95,11 @@ async function stopServe() {
 }
 
 async function downloadModel(name) {
-    await fetch(API + `/models/${name}/download`, { method: 'POST' });
+    await fetch(API + `/models/${name}/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backend: 'vllm' }),
+    });
     setTimeout(pollModels, 500);
     setTimeout(pollLogs, 500);
 }
@@ -136,6 +170,7 @@ function renderModelSelect(models) {
 function updateBackendSelect() {
     const modelName = document.getElementById('model-select').value;
     const sel = document.getElementById('backend-select');
+    const current = sel.value;
     sel.innerHTML = '<option value="">-- default --</option>';
 
     const model = modelsData.find(m => m.name === modelName);
@@ -146,6 +181,55 @@ function updateBackendSelect() {
             opt.textContent = b + (b === model.default_backend ? ' (default)' : '');
             sel.appendChild(opt);
         }
+    }
+    if (current) sel.value = current;
+}
+
+function renderClientSelect(tools) {
+    const sel = document.getElementById('client-select');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">-- none --</option>';
+
+    const clients = tools.filter(t => t.kind === 'client');
+    for (const c of clients) {
+        const opt = document.createElement('option');
+        opt.value = c.name;
+        let label = c.name;
+        if (c.install_type === 'pip') label += ' (terminal)';
+        if (c.install_type === 'bridge') label += ' (bridge)';
+        opt.textContent = label;
+        sel.appendChild(opt);
+    }
+    if (current) sel.value = current;
+    updateClientHint();
+}
+
+function updateClientHint() {
+    const clientName = document.getElementById('client-select').value;
+    const hint = document.getElementById('client-hint');
+
+    if (!clientName) {
+        hint.style.display = 'none';
+        return;
+    }
+
+    const tool = toolsData.find(t => t.name === clientName);
+    if (!tool) {
+        hint.style.display = 'none';
+        return;
+    }
+
+    if (tool.install_type === 'pip') {
+        hint.style.display = 'block';
+        hint.innerHTML = `<strong>${clientName}</strong> is a terminal app. After serving, run in your terminal:<br><code>./launcher client ${clientName}</code>`;
+    } else if (tool.install_type === 'bridge') {
+        hint.style.display = 'block';
+        hint.innerHTML = `<strong>${clientName}</strong> connects directly to the backend API. No launch needed.`;
+    } else if (tool.install_type === 'container') {
+        hint.style.display = 'block';
+        hint.innerHTML = `<strong>${clientName}</strong> will launch automatically after the backend is ready.`;
+    } else {
+        hint.style.display = 'none';
     }
 }
 
@@ -189,17 +273,41 @@ function renderSession(status) {
     el.innerHTML = html;
 }
 
-function renderTools(tools) {
-    const el = document.getElementById('tools-content');
-    if (!tools.length) {
-        el.innerHTML = '<span class="nothing-running">No tools configured.</span>';
+function renderBackends(backends) {
+    const el = document.getElementById('backends-content');
+    if (!backends.length) {
+        el.innerHTML = '<span class="nothing-running">No backends configured.</span>';
         return;
     }
 
-    let html = '<table><tr><th>Tool</th><th>Type</th><th>Status</th><th></th></tr>';
-    for (const t of tools) {
+    let html = '<table><tr><th>Name</th><th>Type</th><th>Status</th><th></th></tr>';
+    for (const t of backends) {
         const statusClass = 'status-' + t.status.replace(' ', '-');
         const actions = (t.status === 'not installed')
+            ? `<button class="btn btn-sm btn-primary" onclick="setupTool('${t.name}')">Setup</button>`
+            : '';
+        html += `<tr>
+            <td>${t.name}</td>
+            <td>${t.install_type}</td>
+            <td class="${statusClass}">${t.status}</td>
+            <td>${actions}</td>
+        </tr>`;
+    }
+    html += '</table>';
+    el.innerHTML = html;
+}
+
+function renderClients(clients) {
+    const el = document.getElementById('clients-content');
+    if (!clients.length) {
+        el.innerHTML = '<span class="nothing-running">No clients configured.</span>';
+        return;
+    }
+
+    let html = '<table><tr><th>Name</th><th>Type</th><th>Status</th><th></th></tr>';
+    for (const t of clients) {
+        const statusClass = 'status-' + t.status.replace(' ', '-');
+        const actions = (t.status === 'not installed' )
             ? `<button class="btn btn-sm btn-primary" onclick="setupTool('${t.name}')">Setup</button>`
             : '';
         html += `<tr>
@@ -222,14 +330,96 @@ function renderLogs(lines) {
     }
 }
 
+// --- Settings / Credentials ---
+
+let credentialsData = { ngc: false, hf: false };
+
+async function pollCredentials() {
+    try {
+        credentialsData = await fetchJSON('/credentials');
+    } catch (e) { /* ignore */ }
+}
+
+function openSettings() {
+    document.getElementById('settings-modal').style.display = 'flex';
+    document.getElementById('ngc-key-input').value = '';
+    document.getElementById('hf-token-input').value = '';
+    updateCredentialStatus();
+}
+
+function closeSettings() {
+    document.getElementById('settings-modal').style.display = 'none';
+}
+
+function updateCredentialStatus() {
+    const ngcStatus = document.getElementById('ngc-status');
+    const hfStatus = document.getElementById('hf-status');
+
+    if (credentialsData.ngc) {
+        ngcStatus.textContent = 'configured';
+        ngcStatus.className = 'key-status configured';
+    } else {
+        ngcStatus.textContent = 'not set';
+        ngcStatus.className = 'key-status missing';
+    }
+
+    if (credentialsData.hf) {
+        hfStatus.textContent = 'configured';
+        hfStatus.className = 'key-status configured';
+    } else {
+        hfStatus.textContent = 'not set';
+        hfStatus.className = 'key-status missing';
+    }
+}
+
+async function saveCredentials() {
+    const ngcKey = document.getElementById('ngc-key-input').value.trim();
+    const hfToken = document.getElementById('hf-token-input').value.trim();
+
+    const body = {};
+    if (ngcKey) body.ngc_api_key = ngcKey;
+    if (hfToken) body.hf_token = hfToken;
+
+    if (Object.keys(body).length === 0) {
+        closeSettings();
+        return;
+    }
+
+    const res = await fetch(API + '/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    credentialsData = await res.json();
+    updateCredentialStatus();
+    closeSettings();
+}
+
+// Close modal on backdrop click
+document.getElementById('settings-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeSettings();
+});
+
 // --- Init ---
 
 document.getElementById('model-select').addEventListener('change', updateBackendSelect);
+document.getElementById('client-select').addEventListener('change', updateClientHint);
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab).classList.add('active');
+    });
+});
 
 pollModels();
 pollStatus();
 pollTools();
 pollLogs();
+pollCredentials();
 
 setInterval(pollModels, POLL_INTERVAL);
 setInterval(pollStatus, POLL_INTERVAL);

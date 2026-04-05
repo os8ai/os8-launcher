@@ -10,30 +10,78 @@
     <header>
         <h1>os8-launcher</h1>
         <span class="subtitle">local AI model management</span>
+        <button class="btn-settings" onclick="openSettings()" title="API Keys">Settings</button>
     </header>
+
+    <div id="settings-modal" class="modal" style="display:none">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>API Keys</h2>
+                <button class="modal-close" onclick="closeSettings()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="control-group">
+                    <label for="ngc-key-input">NVIDIA NGC API Key</label>
+                    <div class="key-row">
+                        <input type="password" id="ngc-key-input" placeholder="nvapi-...">
+                        <span id="ngc-status" class="key-status"></span>
+                    </div>
+                    <div class="key-help">Required for NIM containers. Get one at <a href="https://ngc.nvidia.com" target="_blank">ngc.nvidia.com</a></div>
+                </div>
+                <div class="control-group">
+                    <label for="hf-token-input">HuggingFace Token</label>
+                    <div class="key-row">
+                        <input type="password" id="hf-token-input" placeholder="hf_...">
+                        <span id="hf-status" class="key-status"></span>
+                    </div>
+                    <div class="key-help">Required for gated models. Get one at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co</a></div>
+                </div>
+                <div class="control-actions">
+                    <button class="btn btn-primary" onclick="saveCredentials()">Save</button>
+                    <button class="btn" onclick="closeSettings()">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <main>
         <div class="panel" id="panel-models">
-            <h2>Model Library</h2>
-            <div id="models-content">Loading...</div>
+            <h2>Models &amp; Tools</h2>
+            <div class="tabs">
+                <button class="tab active" data-tab="tab-models">Models</button>
+                <button class="tab" data-tab="tab-backends">Backends</button>
+                <button class="tab" data-tab="tab-clients">Clients</button>
+            </div>
+            <div id="tab-models" class="tab-content active">
+                <div id="models-content">Loading...</div>
+            </div>
+            <div id="tab-backends" class="tab-content">
+                <div id="backends-content">Loading...</div>
+            </div>
+            <div id="tab-clients" class="tab-content">
+                <div id="clients-content">Loading...</div>
+            </div>
         </div>
 
         <div class="panel" id="panel-controls">
             <h2>Launch Controls</h2>
             <div class="control-group">
                 <label for="model-select">Model</label>
-                <select id="model-select"><option value="">--</option></select>
+                <select id="model-select"><option value="">-- select model --</option></select>
             </div>
             <div class="control-group">
                 <label for="backend-select">Backend</label>
-                <select id="backend-select"><option value="">--</option></select>
+                <select id="backend-select"><option value="">-- default --</option></select>
+            </div>
+            <div class="control-group">
+                <label for="client-select">Client</label>
+                <select id="client-select"><option value="">-- none --</option></select>
             </div>
             <div class="control-actions">
                 <button id="btn-serve" class="btn btn-primary" onclick="startServe()">Serve</button>
                 <button id="btn-stop" class="btn btn-danger" onclick="stopServe()">Stop</button>
             </div>
-            <h3>Tools</h3>
-            <div id="tools-content">Loading...</div>
+            <div id="client-hint" class="client-hint" style="display:none"></div>
         </div>
 
         <div class="panel" id="panel-session">

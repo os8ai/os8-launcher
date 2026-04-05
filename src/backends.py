@@ -53,6 +53,10 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
     if ngc_key:
         variables["ngc_api_key"] = ngc_key
 
+    # Container image from manifest
+    if backend.manifest and "image" in backend.manifest.fields:
+        variables["image"] = backend.manifest.fields["image"]
+
     # Binary-specific
     if backend.manifest and "binary" in backend.manifest.fields:
         variables["binary"] = str(repo_root / backend.manifest.fields["binary"])
@@ -85,10 +89,12 @@ def _start_container(cmd_string: str, backend_name: str) -> str:
     return container_id
 
 
-def _start_pip_process(cmd_string: str, venv_path: Path) -> subprocess.Popen:
+def _start_pip_process(cmd_string: str, venv_path: Path, extra_env: dict | None = None) -> subprocess.Popen:
     """Start a pip-based backend as a background subprocess."""
     cmd = parse_command(cmd_string)
     env = build_env_for_venv(venv_path)
+    if extra_env:
+        env.update(extra_env)
 
     process = subprocess.Popen(
         cmd,
@@ -258,7 +264,8 @@ def start_backend(
                 f"Backend '{backend_name}' is not installed.\n"
                 f"Run: ./launcher setup {backend_name}"
             )
-        process = _start_pip_process(cmd_string, venv_path)
+        extra_env = manifest.fields.get("env") if manifest.fields.get("env") else None
+        process = _start_pip_process(cmd_string, venv_path, extra_env)
         pid = process.pid
         print(f"  Process started: PID {pid}")
         check_alive = lambda: is_process_alive(pid)
@@ -290,7 +297,7 @@ def start_backend(
 
     # 9. Health check
     try:
-        _wait_for_healthy(backend.port, check_alive)
+        _wait_for_healthy(backend.port, check_alive, timeout=900)
     except (BackendError, KeyboardInterrupt):
         print("\n  Cleaning up...")
         stop_backend()

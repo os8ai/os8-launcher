@@ -16,6 +16,7 @@ from src.backends import (
     get_status_data, BackendError,
 )
 from src.clients import start_client, stop_client, ClientError
+from src.credentials import get_ngc_key, set_ngc_key, get_hf_token, set_hf_token
 from src.installer import (
     setup_tool, get_all_tools_status, InstallError,
 )
@@ -82,6 +83,33 @@ class ServeRequest(BaseModel):
 
 class DownloadRequest(BaseModel):
     backend: str | None = None
+
+
+class CredentialsRequest(BaseModel):
+    ngc_api_key: str | None = None
+    hf_token: str | None = None
+
+
+# --- Credentials endpoints ---
+
+@app.get("/api/credentials")
+def api_credentials():
+    return {
+        "ngc": bool(get_ngc_key()),
+        "hf": bool(get_hf_token()),
+    }
+
+
+@app.post("/api/credentials")
+def api_credentials_set(req: CredentialsRequest):
+    if req.ngc_api_key is not None:
+        set_ngc_key(req.ngc_api_key)
+    if req.hf_token is not None:
+        set_hf_token(req.hf_token)
+    return {
+        "ngc": bool(get_ngc_key()),
+        "hf": bool(get_hf_token()),
+    }
 
 
 # --- Read-only endpoints ---
@@ -162,15 +190,16 @@ def api_client_stop(name: str):
 
 
 @app.post("/api/models/{name}/download")
-def api_model_download(name: str, background_tasks: BackgroundTasks):
+def api_model_download(name: str, req: DownloadRequest = None, background_tasks: BackgroundTasks = None):
     try:
         _config().get_model(name)
     except ConfigError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    backend = req.backend if req else None
     background_tasks.add_task(
         _run_with_log_capture,
-        download_model, name, _config(), _repo_root(),
+        download_model, name, _config(), _repo_root(), backend,
     )
     return {"status": "started"}
 

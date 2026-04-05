@@ -61,6 +61,43 @@ main {
     margin-bottom: 0.5rem;
 }
 
+.panel h4 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #777;
+    margin-top: 0.75rem;
+    margin-bottom: 0.35rem;
+}
+
+/* Tabs */
+.tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid #2a2a4a;
+}
+
+.tab {
+    padding: 0.4rem 0.75rem;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #888;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+.tab:hover { color: #ccc; }
+.tab.active {
+    color: #e0e0e0;
+    border-bottom-color: #e94560;
+}
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
 /* Tables */
 table {
     width: 100%;
@@ -129,6 +166,24 @@ select {
     margin-bottom: 0.5rem;
 }
 
+.client-hint {
+    font-size: 0.8rem;
+    color: #aaa;
+    background: #16213e;
+    border: 1px solid #2a2a4a;
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+    line-height: 1.5;
+}
+
+.client-hint code {
+    background: #0d0d1a;
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    color: #4ecca3;
+}
+
 /* Buttons */
 .btn {
     padding: 0.4rem 1rem;
@@ -176,7 +231,108 @@ select {
     white-space: pre-wrap;
     word-wrap: break-word;
     color: #aaa;
+    user-select: text;
+    cursor: text;
 }
+
+/* Settings button */
+.btn-settings {
+    margin-left: auto;
+    padding: 0.3rem 0.75rem;
+    background: #0f3460;
+    border: 1px solid #2a2a4a;
+    color: #aaa;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+.btn-settings:hover { background: #1a4a8a; color: #e0e0e0; }
+
+/* Modal */
+.modal {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+}
+
+.modal-content {
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    width: 480px;
+    max-width: 90vw;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid #2a2a4a;
+}
+
+.modal-header h2 {
+    font-size: 1rem;
+    color: #e0e0e0;
+    margin: 0;
+    border: none;
+    padding: 0;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 1.4rem;
+    cursor: pointer;
+    padding: 0 0.25rem;
+}
+.modal-close:hover { color: #e0e0e0; }
+
+.modal-body {
+    padding: 1.25rem;
+}
+
+.modal-body .control-group {
+    margin-bottom: 1rem;
+}
+
+.modal-body input[type="password"] {
+    width: 100%;
+    padding: 0.4rem 0.5rem;
+    background: #16213e;
+    border: 1px solid #2a2a4a;
+    color: #e0e0e0;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-family: monospace;
+}
+
+.key-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.key-row input { flex: 1; }
+
+.key-status {
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+.key-status.configured { color: #4ecca3; }
+.key-status.missing { color: #888; }
+
+.key-help {
+    font-size: 0.75rem;
+    color: #666;
+    margin-top: 0.25rem;
+}
+.key-help a { color: #5e7ce2; }
 
 /* Responsive */
 @media (max-width: 800px) {
