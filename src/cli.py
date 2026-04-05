@@ -7,13 +7,6 @@ from pathlib import Path
 from src.config import ConfigError, load_config, format_config
 
 
-def _stub(phase, description):
-    """Create a stub handler that prints a not-yet-implemented message."""
-    def handler(args):
-        print(f"{description} — coming in Phase {phase}.")
-    return handler
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="launcher",
@@ -62,20 +55,21 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve", help="Start a serving backend")
     serve_parser.add_argument("model", help="Model to serve")
     serve_parser.add_argument("--backend", help="Backend to use (default: model's default)")
-    serve_parser.set_defaults(handler=_stub(3, "Backend serving"))
+    serve_parser.set_defaults(handler="serve")
 
     # --- client ---
     client_parser = subparsers.add_parser("client", help="Start a client")
     client_parser.add_argument("name", help="Client to start")
-    client_parser.set_defaults(handler=_stub(3, "Client launch"))
+    client_parser.set_defaults(handler="client")
 
     # --- status ---
     status_parser = subparsers.add_parser("status", help="Show what's running")
-    status_parser.set_defaults(handler=_stub(3, "Status reporting"))
+    status_parser.set_defaults(handler="status")
 
     # --- stop ---
     stop_parser = subparsers.add_parser("stop", help="Stop all running services")
-    stop_parser.set_defaults(handler=_stub(3, "Service shutdown"))
+    stop_parser.add_argument("--client", help="Stop only this client")
+    stop_parser.set_defaults(handler="stop")
 
     return parser
 
@@ -179,6 +173,44 @@ def main(repo_root: Path):
             sys.exit(1)
         return
 
-    # --- callable stub handlers (Phase 3+) ---
-    if callable(handler):
-        handler(args)
+    # --- serve ---
+    if handler == "serve":
+        from src.backends import start_backend, BackendError
+        try:
+            config = load_config(repo_root)
+            start_backend(args.model, getattr(args, "backend", None), config, repo_root)
+        except (ConfigError, BackendError, KeyboardInterrupt) as e:
+            if isinstance(e, KeyboardInterrupt):
+                print("\nAborted.")
+            else:
+                print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- client ---
+    if handler == "client":
+        from src.clients import start_client, ClientError
+        try:
+            config = load_config(repo_root)
+            start_client(args.name, config, repo_root)
+        except (ConfigError, ClientError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- status ---
+    if handler == "status":
+        from src.backends import get_status
+        print(get_status())
+        return
+
+    # --- stop ---
+    if handler == "stop":
+        from src.backends import stop_all, stop_backend
+        from src.clients import stop_client
+        client_name = getattr(args, "client", None)
+        if client_name:
+            stop_client(client_name)
+        else:
+            stop_all()
+        return
