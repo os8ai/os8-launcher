@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>os8-launcher</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>os8-launcher</h1>
+        <span class="subtitle">local AI model management</span>
+    </header>
+
+    <main>
+        <div class="panel" id="panel-models">
+            <h2>Model Library</h2>
+            <div id="models-content">Loading...</div>
+        </div>
+
+        <div class="panel" id="panel-controls">
+            <h2>Launch Controls</h2>
+            <div class="control-group">
+                <label for="model-select">Model</label>
+                <select id="model-select"><option value="">--</option></select>
+            </div>
+            <div class="control-group">
+                <label for="backend-select">Backend</label>
+                <select id="backend-select"><option value="">--</option></select>
+            </div>
+            <div class="control-actions">
+                <button id="btn-serve" class="btn btn-primary" onclick="startServe()">Serve</button>
+                <button id="btn-stop" class="btn btn-danger" onclick="stopServe()">Stop</button>
+            </div>
+            <h3>Tools</h3>
+            <div id="tools-content">Loading...</div>
+        </div>
+
+        <div class="panel" id="panel-session">
+            <h2>Active Session</h2>
+            <div id="session-content">Loading...</div>
+        </div>
+
+        <div class="panel" id="panel-logs">
+            <h2>Logs</h2>
+            <pre id="log-output"></pre>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

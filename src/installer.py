@@ -318,6 +318,23 @@ def update_all(config: Config, repo_root: Path):
         print()
 
 
+def get_all_tools_status(config: Config, repo_root: Path) -> list[dict]:
+    """Return install status for all backends and clients."""
+    tools = []
+    for name in config.backends:
+        status = get_tool_status(name, config, repo_root)
+        install_type = config.backends[name].manifest.install_type if config.backends[name].manifest else "unknown"
+        tools.append({"name": name, "kind": "backend", "status": status, "install_type": install_type})
+    for name, client in config.clients.items():
+        if client.type == "bridge":
+            tools.append({"name": name, "kind": "client", "status": "bridge", "install_type": "bridge"})
+        else:
+            status = get_tool_status(name, config, repo_root)
+            install_type = client.manifest.install_type if client.manifest else "unknown"
+            tools.append({"name": name, "kind": "client", "status": status, "install_type": install_type})
+    return tools
+
+
 def get_tool_status(name: str, config: Config, repo_root: Path) -> str:
     """Check if a tool is installed. Returns a status string."""
     kind, manifest = _resolve_tool(name, config)

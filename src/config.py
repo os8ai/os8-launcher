@@ -226,6 +226,39 @@ def load_config(repo_root: str | Path) -> Config:
     return config
 
 
+def config_to_dict(config: Config) -> dict:
+    """Serialize Config to a JSON-friendly dict."""
+    return {
+        "models": {
+            name: {
+                "source": m.source,
+                "format": m.format,
+                "path": m.path,
+                "backends": m.backends,
+                "default_backend": m.default_backend,
+                "nim_image": m.nim_image,
+            }
+            for name, m in config.models.items()
+        },
+        "backends": {
+            name: {
+                "port": b.port,
+                "install_type": b.manifest.install_type if b.manifest else None,
+                "manifest_path": b.manifest_path,
+            }
+            for name, b in config.backends.items()
+        },
+        "clients": {
+            name: {
+                "type": c.type,
+                "port": c.port,
+                "install_type": c.manifest.install_type if c.manifest else None,
+            }
+            for name, c in config.clients.items()
+        },
+    }
+
+
 def format_config(config: Config) -> str:
     """Format a Config object as a human-readable string."""
     lines = []

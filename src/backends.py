@@ -396,6 +396,37 @@ def _check_health(port: int) -> str:
         return "unhealthy"
 
 
+def get_status_data() -> dict:
+    """Return structured status for JSON serialization."""
+    state = validate_state()
+    backend = state.get("backend")
+    clients = state.get("clients", {})
+
+    result = {"backend": None, "clients": {}}
+
+    if backend:
+        health = _check_health(backend["port"])
+        uptime = _format_uptime(backend.get("start_time", ""))
+        result["backend"] = {
+            "name": backend["name"],
+            "model": backend["model"],
+            "port": backend["port"],
+            "health": health,
+            "uptime": uptime,
+            "start_time": backend.get("start_time"),
+            "install_type": backend.get("install_type"),
+        }
+
+    for name, entry in clients.items():
+        result["clients"][name] = {
+            "port": entry.get("port"),
+            "uptime": _format_uptime(entry.get("start_time", "")),
+            "start_time": entry.get("start_time"),
+        }
+
+    return result
+
+
 def get_status() -> str:
     """Get a formatted status string for all running services."""
     state = validate_state()

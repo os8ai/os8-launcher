@@ -6,4 +6,6 @@ requires-python = ">=3.10"
 dependencies = [
     "pyyaml",
     "huggingface_hub",
+    "fastapi",
+    "uvicorn[standard]",
 ]

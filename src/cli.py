@@ -71,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("--client", help="Stop only this client")
     stop_parser.set_defaults(handler="stop")
 
+    # --- server ---
+    server_parser = subparsers.add_parser("server", help="Start the web dashboard")
+    server_parser.add_argument("--port", type=int, default=9000, help="Port for the dashboard (default: 9000)")
+    server_parser.set_defaults(handler="server")
+
     return parser
 
 
@@ -213,4 +218,12 @@ def main(repo_root: Path):
             stop_client(client_name)
         else:
             stop_all()
+        return
+
+    # --- server ---
+    if handler == "server":
+        import uvicorn
+        from src.api import app
+        print(f"Starting os8-launcher dashboard on http://localhost:{args.port}")
+        uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
         return

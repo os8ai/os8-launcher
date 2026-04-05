@@ -44,6 +44,28 @@ def _is_downloaded(model: ModelConfig, repo_root: Path) -> bool:
     return any(weights_path.rglob("*"))
 
 
+# --- data ---
+
+def get_models_data(config: Config, repo_root: Path) -> list[dict]:
+    """Return model info as a list of dicts for JSON serialization."""
+    result = []
+    for name, model in config.models.items():
+        downloaded = _is_downloaded(model, repo_root)
+        size_bytes = _get_dir_size_bytes(repo_root / model.path)
+        result.append({
+            "name": name,
+            "source": model.source,
+            "format": model.format,
+            "backends": model.backends,
+            "default_backend": model.default_backend,
+            "downloaded": downloaded,
+            "size_bytes": size_bytes,
+            "size_human": _format_size(size_bytes),
+            "nim_image": model.nim_image,
+        })
+    return result
+
+
 # --- list ---
 
 def list_models(config: Config, repo_root: Path):
