@@ -9,6 +9,10 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 
+from src.actionlog import (
+    log_start, log_ready, log_stopped, log_fail,
+    log_group_start, log_group_done,
+)
 from src.config import Config, ConfigError
 from src.credentials import get_ngc_key, prompt_ngc_key
 from src.preflight import (
@@ -269,6 +273,21 @@ def start_backend(
     repo_root: Path,
 ):
     """Start a serving backend for the given model."""
+    log_start("backend", f"{backend_name or '?'} for {model_name}")
+    try:
+        _start_backend_inner(model_name, backend_name, config, repo_root)
+    except Exception as e:
+        log_fail("backend", model_name, e)
+        raise
+    log_ready("backend", model_name)
+
+
+def _start_backend_inner(
+    model_name: str,
+    backend_name: str | None,
+    config: Config,
+    repo_root: Path,
+):
     # 1. Validate state — check nothing is already running
     state = validate_state()
     if "backend" in state:
@@ -463,11 +482,20 @@ def stop_backend():
         return
 
     name = backend["name"]
+    log_start("backend", name)
+    try:
+        _stop_backend_inner(backend)
+    except Exception as e:
+        log_fail("backend", name, e)
+        raise
+    log_stopped("backend", name)
+
+
+def _stop_backend_inner(backend: dict):
+    name = backend["name"]
     install_type = backend.get("install_type")
     container_id = backend.get("container_id")
     pid = backend.get("pid")
-
-    print(f"Stopping {name}...")
 
     if install_type == "container" and container_id:
         subprocess.run(
@@ -498,25 +526,37 @@ def stop_backend():
 def stop_all():
     """Stop the backend and all tracked clients."""
     state = validate_state()
-
-    # Stop clients first
     clients = state.get("clients", {})
-    for client_name, entry in list(clients.items()):
-        container_id = entry.get("container_id")
-        if container_id:
-            print(f"Stopping client {client_name}...")
-            subprocess.run(
-                ["docker", "stop", f"os8-{client_name}"],
-                capture_output=True, timeout=45,
-            )
-            print(f"  Stopped.")
-        clear_client(client_name)
 
-    # Stop backend
-    if "backend" in state:
-        stop_backend()
-    elif not clients:
+    if not clients and "backend" not in state:
         print("Nothing running.")
+        return
+
+    log_group_start("Stopping all services")
+    try:
+        # Stop clients first
+        for client_name, entry in list(clients.items()):
+            log_start("client", client_name)
+            try:
+                container_id = entry.get("container_id")
+                if container_id:
+                    subprocess.run(
+                        ["docker", "stop", f"os8-{client_name}"],
+                        capture_output=True, timeout=45,
+                    )
+                clear_client(client_name)
+            except Exception as e:
+                log_fail("client", client_name, e)
+                raise
+            log_stopped("client", client_name)
+
+        # Stop backend
+        if "backend" in state:
+            stop_backend()
+    except Exception as e:
+        log_fail("group", "all services", e)
+        raise
+    log_group_done("All services stopped")
 
 
 def _format_uptime(start_time_str: str) -> str:

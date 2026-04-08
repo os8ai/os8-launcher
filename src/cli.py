@@ -1,6 +1,7 @@
 """os8-launcher CLI — command-line interface for managing local AI models."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -230,9 +231,10 @@ def main(repo_root: Path):
     if handler == "server":
         import uvicorn
         from src.api import app
-        # Clean up any backends/clients left over from a previous launcher run.
-        # State on disk can outlive the actual processes/containers, which causes
-        # "already running" errors on the next action.
+        # Crash-recovery safety net: clean up any state left over from a
+        # previous launcher run that didn't shut down cleanly. Normal
+        # shutdowns/restarts already tear things down before exit, so this
+        # is usually a no-op.
         from src.backends import stop_all
         try:
             stop_all()
@@ -251,7 +253,6 @@ def main(repo_root: Path):
             # tasks corrupt the next run(). A fresh interpreter sidesteps
             # all of that, and the browser's /api/health poll picks us back
             # up automatically once we bind the port again.
-            import os
             print("Restarting dashboard...")
             launcher_path = str(repo_root / "launcher")
             os.execv(launcher_path, [launcher_path, *sys.argv[1:]])

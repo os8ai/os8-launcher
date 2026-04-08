@@ -3,7 +3,9 @@
 import collections
 import contextlib
 import io
+import os
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -73,6 +75,10 @@ def startup():
     # Discover repo root from this file's location
     app.state.repo_root = Path(__file__).resolve().parent.parent
     app.state.config = load_config(app.state.repo_root)
+    # Per-process identity, used by /api/health so the dashboard can tell
+    # the post-restart process apart from the pre-restart one (the gap
+    # between socket close and rebind is too small to detect by polling).
+    app.state.server_id = f"{os.getpid()}-{int(time.time() * 1000)}"
 
 
 def _config():
@@ -88,6 +94,7 @@ def _repo_root() -> Path:
 class ServeRequest(BaseModel):
     model: str
     backend: str | None = None
+    client: str | None = None
 
 
 class DownloadRequest(BaseModel):
@@ -156,6 +163,17 @@ def api_logs():
 
 # --- Mutation endpoints ---
 
+def _serve_sequential(model: str, backend: str | None, client: str | None):
+    """Start the backend, then (only if it came up healthy) start the client.
+
+    Run inside _run_with_log_capture so all output lands in the dashboard log
+    in strict order: backend lines first, then client lines.
+    """
+    start_backend(model, backend, _config(), _repo_root())
+    if client:
+        start_client(client, _config(), _repo_root(), model, backend)
+
+
 @app.post("/api/serve")
 def api_serve(req: ServeRequest, background_tasks: BackgroundTasks):
     try:
@@ -164,18 +182,37 @@ def api_serve(req: ServeRequest, background_tasks: BackgroundTasks):
         config.get_model(req.model)
         if req.backend:
             config.get_backend(req.backend)
+        if req.client:
+            config.get_client(req.client)
     except ConfigError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     background_tasks.add_task(
         _run_with_log_capture,
-        start_backend, req.model, req.backend, _config(), _repo_root(),
+        _serve_sequential, req.model, req.backend, req.client,
     )
     return {"status": "starting"}
 
 
 @app.delete("/api/serve")
 def api_serve_stop():
+    """Stop everything: clients first, then the backend.
+
+    Used by the main launch-controls Stop button.
+    """
+    try:
+        _run_with_log_capture(stop_all)
+    except BackendError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "stopped"}
+
+
+@app.delete("/api/backend")
+def api_backend_stop():
+    """Stop only the backend, leaving clients running.
+
+    Used by the per-row Stop button next to the backend in the active session.
+    """
     try:
         _run_with_log_capture(stop_backend)
     except BackendError as e:
@@ -257,21 +294,21 @@ def api_stop_all():
 
 @app.get("/api/health")
 def api_health():
-    return {"status": "ok"}
+    return {"status": "ok", "server_id": getattr(app.state, "server_id", None)}
 
 
 def _shutdown_after_response(restart: bool):
     """Run in a background thread so the HTTP response is flushed first."""
     import time
     time.sleep(0.2)
-    # On a plain stop (not restart), tear down any backend/clients we own so
-    # we don't leave orphan containers/processes behind. Restart already gets
-    # this for free via the cleanup at server startup.
-    if not restart:
-        try:
-            stop_all()
-        except Exception as e:
-            print(f"  (cleanup warning: {e})")
+    # Tear down any backend/clients we own before exiting, for both stop and
+    # restart. Doing it here (rather than on the next startup) means the new
+    # process binds the port quickly and the browser's health-poll window
+    # isn't eaten by docker stop draining containers.
+    try:
+        stop_all()
+    except Exception as e:
+        print(f"  (cleanup warning: {e})")
     app.state.restart_requested = restart
     server = getattr(app.state, "server", None)
     if server is not None:

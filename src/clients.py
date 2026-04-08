@@ -3,6 +3,7 @@
 import subprocess
 from pathlib import Path
 
+from src.actionlog import log_start, log_ready, log_stopped, log_fail
 from src.config import Config, ConfigError
 from src.preflight import check_docker, run_checks
 from src.runtime import check_port, expand_template, build_env_for_venv, parse_command
@@ -74,10 +75,25 @@ def start_client(
     model: str | None = None,
     backend_name: str | None = None,
 ):
-    """Start a client connected to the running backend.
+    """Start a client connected to the running backend."""
+    log_start("client", client_name)
+    try:
+        _start_client_inner(client_name, config, repo_root, model, backend_name)
+    except Exception as e:
+        log_fail("client", client_name, e)
+        raise
+    log_ready("client", client_name)
 
-    If `model` (and optionally `backend_name`) are provided and no backend is
-    currently running, auto-start the backend first so the client launches
+
+def _start_client_inner(
+    client_name: str,
+    config: Config,
+    repo_root: Path,
+    model: str | None = None,
+    backend_name: str | None = None,
+):
+    """If `model` (and optionally `backend_name`) are provided and no backend
+    is currently running, auto-start the backend first so the client launches
     against it. If a backend is already running, the model/backend hints are
     ignored — we never restart a working backend.
     """
@@ -200,13 +216,16 @@ def stop_client(client_name: str):
         print(f"Client '{client_name}' is not running.")
         return
 
-    container_id = entry.get("container_id")
-    if container_id:
-        print(f"Stopping {client_name}...")
-        subprocess.run(
-            ["docker", "stop", f"os8-{client_name}"],
-            capture_output=True, timeout=45,
-        )
-        print(f"  Stopped.")
-
-    clear_client(client_name)
+    log_start("client", client_name)
+    try:
+        container_id = entry.get("container_id")
+        if container_id:
+            subprocess.run(
+                ["docker", "stop", f"os8-{client_name}"],
+                capture_output=True, timeout=45,
+            )
+        clear_client(client_name)
+    except Exception as e:
+        log_fail("client", client_name, e)
+        raise
+    log_stopped("client", client_name)

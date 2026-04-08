@@ -52,19 +52,42 @@ async function stopDashboard() {
 
 async function restartDashboard() {
     _showOverlay(`<h2 style="margin:0 0 0.75rem;font-size:1.4rem">Restarting dashboard…</h2><p id="restart-status" style="margin:0;opacity:0.85">Sending restart signal.</p>`);
+    // Capture the current server's identity BEFORE asking it to restart, so
+    // we can later tell the new process apart from the old one. The bind/
+    // rebind gap is too small to detect by polling for connection failure.
+    let oldServerId = null;
+    try {
+        const h = await (await fetch(API + '/health', { cache: 'no-store' })).json();
+        oldServerId = h.server_id || null;
+    } catch (e) { /* ignore */ }
     try {
         await fetch(API + '/server/restart', { method: 'POST' });
     } catch (e) { /* expected during the restart window */ }
     const status = document.getElementById('restart-status');
-    if (status) status.textContent = 'Waiting for server to come back…';
+    if (status) status.textContent = 'Waiting for new server…';
     const start = Date.now();
-    while (Date.now() - start < 30000) {
-        await new Promise(r => setTimeout(r, 400));
+    while (Date.now() - start < 90000) {
+        await new Promise(r => setTimeout(r, 300));
         try {
             const res = await fetch(API + '/health', { cache: 'no-store' });
-            if (res.ok) {
+            if (!res.ok) continue;
+            const body = await res.json();
+            // Only treat /api/health as "back" once we've confirmed we're
+            // talking to a NEW process. The old process keeps answering
+            // /api/health (and serving stale /api/status, /api/logs) the
+            // whole time stop_all is draining containers.
+            // - If body.server_id is missing, we're hitting a pre-server_id
+            //   build — almost certainly the old process. Keep waiting.
+            // - If it matches the captured oldServerId, same process. Wait.
+            if (!body.server_id) continue;
+            if (body.server_id === oldServerId) continue;
+            {
+                // Hard-reload the page so the browser pulls fresh JS/HTML
+                // from the new server. Without this the user keeps running
+                // whatever app.js was loaded before the restart, which is
+                // why edits to the dashboard appear to "not take effect"
+                // and why the in-memory log/status state can look stale.
                 if (status) status.textContent = 'Reloading page…';
-                await new Promise(r => setTimeout(r, 300));
                 location.reload();
                 return;
             }
@@ -81,6 +104,13 @@ let modelsData = [];
 let toolsData = [];
 let statusData = { backend: null, clients: {} };
 let lastLogCount = 0;
+// Set when the user clicks Serve, cleared once the backend appears in /status
+// (or after a safety timeout, or when an Error: line shows up in /logs).
+// While set, the Serve button and the model/backend/client selects are
+// disabled so the user can't fire a second serve mid-startup.
+let serveInFlight = false;
+let serveInFlightTimer = null;
+const SERVE_INFLIGHT_TIMEOUT_MS = 120000;
 
 // --- Polling ---
 
@@ -102,7 +132,70 @@ async function pollStatus() {
     try {
         statusData = await fetchJSON('/status');
         renderSession(statusData);
+        // Startup is "done" once the backend is up AND, if a client was
+        // requested, the client is up too. We don't track which client was
+        // requested, so any client appearing is good enough — same heuristic
+        // as before for the normal serve path.
+        const _clientsUp = Object.keys(statusData.clients || {}).length > 0;
+        if (statusData.backend && (!serveInFlight || _clientsUp || !document.getElementById('client-select')?.value)) {
+            _clearServeInFlight();
+        }
+        updateLaunchControls();
     } catch (e) { /* ignore poll errors */ }
+}
+
+function _setServeInFlight() {
+    serveInFlight = true;
+    if (serveInFlightTimer) clearTimeout(serveInFlightTimer);
+    serveInFlightTimer = setTimeout(() => {
+        // Safety net: if startup never produced a backend in /status (e.g.
+        // silent failure), don't strand the UI forever.
+        _clearServeInFlight();
+        updateLaunchControls();
+    }, SERVE_INFLIGHT_TIMEOUT_MS);
+    updateLaunchControls();
+}
+
+function _clearServeInFlight() {
+    serveInFlight = false;
+    if (serveInFlightTimer) {
+        clearTimeout(serveInFlightTimer);
+        serveInFlightTimer = null;
+    }
+}
+
+function updateLaunchControls() {
+    const backendUp = !!statusData.backend;
+    const clientsUp = Object.keys(statusData.clients || {}).length > 0;
+    const running = backendUp || clientsUp;
+    const busy = running || serveInFlight;
+    // Special case: backend is up but no client is running. The user can
+    // pick a client and hit Serve to attach it to the existing backend.
+    const canAttachClient = backendUp && !clientsUp && !serveInFlight;
+    const serveBtn = document.getElementById('btn-serve');
+    const stopBtn = document.getElementById('btn-stop');
+    const modelSel = document.getElementById('model-select');
+    const backendSel = document.getElementById('backend-select');
+    const clientSel = document.getElementById('client-select');
+    if (serveBtn) {
+        serveBtn.disabled = busy && !canAttachClient;
+        if (serveInFlight && !running) serveBtn.textContent = 'Starting…';
+        else if (canAttachClient) serveBtn.textContent = 'Start client';
+        else serveBtn.textContent = 'Serve';
+    }
+    if (stopBtn) stopBtn.disabled = !busy;
+    // Lock model/backend to whatever is already running; client stays
+    // editable in the attach-client case.
+    if (modelSel) modelSel.disabled = busy;
+    if (backendSel) backendSel.disabled = busy;
+    if (clientSel) clientSel.disabled = busy && !canAttachClient;
+
+    // When the backend is up, force the model/backend selects to reflect it
+    // so the user isn't looking at a stale or empty selection.
+    if (backendUp) {
+        if (modelSel && statusData.backend.model) modelSel.value = statusData.backend.model;
+        if (backendSel && statusData.backend.name) backendSel.value = statusData.backend.name;
+    }
 }
 
 async function pollTools() {
@@ -118,53 +211,85 @@ async function pollLogs() {
     try {
         const lines = await fetchJSON('/logs');
         renderLogs(lines);
+        // If a startup failed silently (backend never appeared in /status),
+        // an Error: line in the logs is our signal to release the in-flight
+        // latch so the user can change selections and try again.
+        if (serveInFlight && !statusData.backend) {
+            for (let i = lines.length - 1; i >= 0 && i >= lines.length - 10; i--) {
+                if (lines[i].startsWith('Error:')) {
+                    _clearServeInFlight();
+                    updateLaunchControls();
+                    break;
+                }
+            }
+        }
     } catch (e) { /* ignore poll errors */ }
 }
 
 // --- Actions ---
 
 async function startServe() {
+    const client = document.getElementById('client-select').value;
+    const backendUp = !!statusData.backend;
+    const clientsUp = Object.keys(statusData.clients || {}).length > 0;
+
+    // Attach-client path: backend is already running and the user picked a
+    // client. Skip /api/serve and just start the client against the existing
+    // backend. Source the model/backend from statusData (not the disabled
+    // dropdowns) so a stale dropdown value can't silently no-op the click.
+    if (backendUp && !clientsUp && client) {
+        const tool = toolsData.find(t => t.name === client);
+        if (tool && tool.install_type === 'container') {
+            _setServeInFlight();
+            forceLogScrollNext();
+            await fetch(API + `/clients/${client}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: statusData.backend.model,
+                    backend: statusData.backend.name,
+                }),
+            });
+            setTimeout(pollStatus, 500);
+            setTimeout(pollLogs, 500);
+        }
+        return;
+    }
+
+    // Normal serve path: nothing running yet. Read model/backend from the
+    // dropdowns (the user is choosing them now).
     const model = document.getElementById('model-select').value;
     const backend = document.getElementById('backend-select').value;
-    const client = document.getElementById('client-select').value;
     if (!model) return;
 
-    await fetch(API + '/serve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, backend: backend || null }),
-    });
-
-    // If a container client was selected, launch it after a delay (backend needs to start)
+    // Server-side orchestration: the launcher starts the backend, waits for
+    // it to become healthy, then starts the client. This guarantees strict
+    // log ordering and prevents the client from racing ahead of the model.
+    // Only container clients are launched automatically; CLI clients (aider,
+    // etc.) are intentionally launched by the user from a terminal.
+    let clientForServer = null;
     if (client) {
         const tool = toolsData.find(t => t.name === client);
         if (tool && tool.install_type === 'container') {
-            // Poll until backend is healthy, then start client
-            setTimeout(() => launchClientWhenReady(client), 2000);
+            clientForServer = client;
         }
     }
+
+    _setServeInFlight();
+    forceLogScrollNext();
+    await fetch(API + '/serve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, backend: backend || null, client: clientForServer }),
+    });
 
     setTimeout(pollStatus, 500);
     setTimeout(pollLogs, 500);
 }
 
-async function launchClientWhenReady(name) {
-    // Check if backend is running yet
-    try {
-        const status = await fetchJSON('/status');
-        if (status.backend && status.backend.health === 'healthy') {
-            await fetch(API + `/clients/${name}`, { method: 'POST' });
-            setTimeout(pollStatus, 500);
-        } else {
-            // Not ready yet, try again
-            setTimeout(() => launchClientWhenReady(name), 3000);
-        }
-    } catch (e) {
-        setTimeout(() => launchClientWhenReady(name), 3000);
-    }
-}
-
 async function stopServe() {
+    _clearServeInFlight();
+    forceLogScrollNext();
     await fetch(API + '/serve', { method: 'DELETE' });
     setTimeout(pollStatus, 500);
     setTimeout(pollLogs, 500);
@@ -205,7 +330,15 @@ async function startClient(name) {
     setTimeout(pollLogs, 500);
 }
 
+async function stopBackendOnly() {
+    forceLogScrollNext();
+    await fetch(API + '/backend', { method: 'DELETE' });
+    setTimeout(pollStatus, 500);
+    setTimeout(pollLogs, 500);
+}
+
 async function stopClient(name) {
+    forceLogScrollNext();
     await fetch(API + `/clients/${name}`, { method: 'DELETE' });
     setTimeout(pollStatus, 500);
 }
@@ -397,6 +530,7 @@ function renderSession(status) {
             <div><span class="label">URL:</span> <a href="http://localhost:${b.port}/v1" style="color:#5e7ce2">http://localhost:${b.port}/v1</a></div>
             <div><span class="label">Health:</span> <span class="dot ${dotClass}"></span><span class="${healthClass}">${b.health}</span></div>
             <div><span class="label">Uptime:</span> ${b.uptime}</div>
+            <div style="margin-top:0.5rem"><button class="btn btn-sm btn-danger" onclick="stopBackendOnly()">Stop backend</button></div>
         </div>`;
     }
 
@@ -466,17 +600,41 @@ function renderClients(clients) {
     el.innerHTML = html;
 }
 
+// Set by action handlers (startServe, stopServe, stopBackendOnly, stopClient)
+// to force the log pane to scroll to the bottom on the next renderLogs, so
+// the lines produced by the user's click aren't hidden if they had scrolled
+// up to read older output.
+let _forceLogScroll = false;
+function forceLogScrollNext() { _forceLogScroll = true; }
+
+// Escape HTML so log content can never inject markup, then turn bare http(s)
+// URLs into clickable links that open in a new tab. Trailing punctuation
+// (., ,, ), ], etc.) is excluded from the link so "...port 3000)." works.
+function _escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+}
+function _linkifyEscaped(text) {
+    return _escapeHtml(text).replace(
+        /(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]}])/g,
+        url => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`,
+    );
+}
+
 function renderLogs(lines) {
     const el = document.getElementById('log-output');
-    const next = lines.join('\n');
+    const nextText = lines.join('\n');
     // 1. Don't touch the DOM if nothing changed — preserves any active selection.
-    if (el.textContent === next) return;
+    if (el.dataset.rawText === nextText) return;
     // 2. Don't clobber an active selection inside the log pane — wait for the
     //    user to copy / click away before re-rendering.
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
-    const shouldScroll = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
-    el.textContent = next;
+    const shouldScroll = _forceLogScroll || el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    _forceLogScroll = false;
+    el.innerHTML = _linkifyEscaped(nextText);
+    el.dataset.rawText = nextText;
     if (shouldScroll) {
         el.scrollTop = el.scrollHeight;
     }
