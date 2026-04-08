@@ -67,12 +67,31 @@ def _start_detached_container(
     return container_id
 
 
-def start_client(client_name: str, config: Config, repo_root: Path):
-    """Start a client connected to the running backend."""
+def start_client(
+    client_name: str,
+    config: Config,
+    repo_root: Path,
+    model: str | None = None,
+    backend_name: str | None = None,
+):
+    """Start a client connected to the running backend.
+
+    If `model` (and optionally `backend_name`) are provided and no backend is
+    currently running, auto-start the backend first so the client launches
+    against it. If a backend is already running, the model/backend hints are
+    ignored — we never restart a working backend.
+    """
     state = validate_state()
+    if not state.get("backend") and model:
+        # Auto-start the backend the user picked in the launch controls.
+        from src.backends import start_backend
+        start_backend(model, backend_name, config, repo_root)
+        state = validate_state()
+
     backend = _get_running_backend(state)
     backend_port = backend["port"]
     backend_model = backend["model"]
+    backend_name_actual = backend["name"]
 
     # Resolve client
     client = config.get_client(client_name)
@@ -94,9 +113,13 @@ def start_client(client_name: str, config: Config, repo_root: Path):
         raise ClientError(f"Manifest for '{client_name}' has no 'run' field.")
 
     # Build variables
+    from src.backends import served_model_name
+    model_cfg = config.get_model(backend_model)
     variables = {
         "port": str(backend_port),
         "backend_port": str(backend_port),
+        "backend_name": backend_name_actual,
+        "served_model_name": served_model_name(model_cfg, backend_name_actual),
     }
     if client.port:
         variables["port"] = str(client.port)

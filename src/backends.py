@@ -26,10 +26,22 @@ from src.state import (
     is_process_alive,
     is_container_running,
 )
+from src.verification import record_success, record_failure
 
 
 class BackendError(Exception):
     """Raised when a backend operation fails."""
+
+
+def served_model_name(model, backend_name: str) -> str:
+    """Return the name the backend exposes to API clients.
+
+    vLLM uses the launcher's model.name (via --served-model-name).
+    Ollama uses the ollama_tag (e.g. "qwen3-coder:30b").
+    """
+    if backend_name == "ollama":
+        return model.ollama_tag or model.name
+    return model.name
 
 
 def _check_model_downloaded(model_path: Path) -> bool:
@@ -44,6 +56,7 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
     variables = {
         "port": str(backend.port),
         "model_path": str(repo_root / model.path),
+        "model_name": model.name,
     }
 
     # NIM-specific
@@ -61,6 +74,13 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
     if backend.manifest and "binary" in backend.manifest.fields:
         variables["binary"] = str(repo_root / backend.manifest.fields["binary"])
 
+    # Per-model env vars become "-e KEY=VAL" flags injected into the run template.
+    env_flags = " ".join(
+        f"-e {k}={v}" for k, v in (model.backend_env or {}).items()
+    )
+    variables["backend_env_flags"] = env_flags
+    variables["backend_args"] = model.backend_args or ""
+
     return variables
 
 
@@ -71,12 +91,59 @@ def _inject_docker_flags(cmd: list[str], name: str) -> list[str]:
     return cmd
 
 
+def _image_present(image: str) -> bool:
+    """Return True if the image is already cached locally."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True, timeout=10,
+    )
+    return result.returncode == 0
+
+
+def _ensure_image_present(image: str, ngc_key: str | None = None):
+    """If the image isn't cached, log in (if needed) and pull it.
+
+    Streams progress to stdout so the user can see what's happening on a
+    multi-GB pull. No timeout — large NIM images can legitimately take 30+ min.
+    """
+    if _image_present(image):
+        return
+
+    if "nvcr.io" in image:
+        if not ngc_key:
+            raise BackendError(
+                f"Image {image} is not cached locally and requires an NGC API "
+                f"key to pull. Set NGC_API_KEY in Settings first."
+            )
+        print(f"Logging in to nvcr.io...")
+        login = subprocess.run(
+            ["docker", "login", "nvcr.io",
+             "--username", "$oauthtoken",
+             "--password-stdin"],
+            input=ngc_key, capture_output=True, text=True, timeout=30,
+        )
+        if login.returncode != 0:
+            raise BackendError(
+                f"Failed to log in to nvcr.io. Check your NGC API key.\n"
+                f"  {login.stderr.strip()}"
+            )
+
+    print(f"Pulling image: {image}")
+    print(f"This is a one-time download and may take a while.")
+    pull = subprocess.run(["docker", "pull", image])
+    if pull.returncode != 0:
+        raise BackendError(f"Failed to pull image: {image}")
+    print(f"Image pulled successfully.")
+
+
 def _start_container(cmd_string: str, backend_name: str) -> str:
     """Start a Docker container in detached mode. Returns container ID."""
     cmd = parse_command(cmd_string)
     cmd = _inject_docker_flags(cmd, backend_name)
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    # Detached run is near-instant once the image is local; 60s is generous
+    # for slow filesystems but tight enough to fail fast on real problems.
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise BackendError(
             f"Failed to start container:\n  {result.stderr.strip()}"
@@ -106,12 +173,17 @@ def _start_pip_process(cmd_string: str, venv_path: Path, extra_env: dict | None 
     return process
 
 
-def _start_binary_process(cmd_string: str) -> subprocess.Popen:
+def _start_binary_process(cmd_string: str, extra_env: dict | None = None) -> subprocess.Popen:
     """Start a binary backend as a background subprocess."""
     cmd = parse_command(cmd_string)
 
+    env = None
+    if extra_env:
+        env = {**os.environ, **extra_env}
+
     process = subprocess.Popen(
         cmd,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
@@ -125,6 +197,7 @@ def _wait_for_healthy(
     timeout: int = 300,
     interval: int = 3,
     initial_delay: int = 5,
+    container_name: str | None = None,
 ):
     """Poll the backend's health endpoint until it responds.
 
@@ -134,13 +207,18 @@ def _wait_for_healthy(
         timeout: Maximum seconds to wait.
         interval: Seconds between attempts.
         initial_delay: Seconds to wait before first attempt.
+        container_name: If set, periodically tail the container's logs into the
+            launcher's stdout so the dashboard log panel shows real backend
+            progress instead of just polling dots.
     """
     url = f"http://localhost:{port}/v1/models"
 
-    print(f"  Waiting for backend to be ready on port {port}...", end="", flush=True)
+    print(f"  Waiting for backend to be ready on port {port}...", flush=True)
     time.sleep(initial_delay)
 
     start = time.time()
+    last_log_dump = 0.0
+    log_interval = 15  # seconds between container log snapshots
     while time.time() - start < timeout:
         # Check if process is still alive
         if not check_alive_fn():
@@ -153,13 +231,29 @@ def _wait_for_healthy(
         try:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=5):
-                print(" ready.")
+                print("  Backend ready.")
                 return
         except (urllib.error.URLError, ConnectionError, OSError):
-            print(".", end="", flush=True)
+            # Periodically tail container logs so the user sees real progress.
+            now = time.time()
+            if container_name and now - last_log_dump >= log_interval:
+                last_log_dump = now
+                elapsed = int(now - start)
+                try:
+                    logs = subprocess.run(
+                        ["docker", "logs", "--tail", "5", container_name],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    tail = (logs.stdout + logs.stderr).strip().splitlines()
+                    if tail:
+                        print(f"  [+{elapsed}s] container log tail:")
+                        for line in tail[-5:]:
+                            print(f"    | {line}")
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
             time.sleep(interval)
 
-    print(" timed out.")
+    print("  Health check timed out.")
     raise BackendError(
         f"Health check timed out after {timeout}s.\n"
         f"The model may still be loading. Check logs:\n"
@@ -199,9 +293,10 @@ def start_backend(
     if not manifest:
         raise BackendError(f"Backend '{backend_name}' has no manifest.")
 
-    # 3. Check model is downloaded (for NIM, cache dir just needs to exist)
+    # 3. Check model is downloaded (for NIM, cache dir just needs to exist;
+    #    for ollama, the store is managed by ollama itself and we pull below)
     model_path = repo_root / model.path
-    if manifest.install_type != "container":
+    if manifest.install_type != "container" and backend_name != "ollama":
         if not _check_model_downloaded(model_path):
             raise BackendError(
                 f"Model '{model_name}' is not downloaded.\n"
@@ -250,6 +345,14 @@ def start_backend(
     if manifest.install_type == "container":
         # Create cache dir for NIM
         model_path.mkdir(parents=True, exist_ok=True)
+        # Ensure the image is cached locally before starting; pulls if missing.
+        image_to_check = (
+            model.nim_image
+            or (manifest.fields.get("image") if manifest.fields else None)
+        )
+        if image_to_check:
+            ngc_key_for_pull = get_ngc_key() if "nvcr.io" in image_to_check else None
+            _ensure_image_present(image_to_check, ngc_key=ngc_key_for_pull)
         container_id = _start_container(cmd_string, backend_name)
         print(f"  Container started: {container_id[:12]}")
         check_alive = lambda: is_container_running(container_id)
@@ -277,7 +380,28 @@ def start_backend(
                 f"Backend '{backend_name}' is not installed.\n"
                 f"Run: ./launcher setup {backend_name}"
             )
-        process = _start_binary_process(cmd_string)
+        binary_env = manifest.fields.get("env") or {}
+        process = _start_binary_process(cmd_string, extra_env=binary_env)
+        # Ollama pull requires the daemon to be running. Start it first,
+        # wait briefly for the API to come up, then pull the tag.
+        if backend_name == "ollama":
+            tag = model.ollama_tag or model.name
+            binary_abs = str(repo_root / binary_rel) if binary_rel else "ollama"
+            print(f"  Waiting for ollama daemon...")
+            for _ in range(30):
+                try:
+                    with urllib.request.urlopen(
+                        f"http://localhost:{backend.port}/api/version", timeout=2
+                    ):
+                        break
+                except (urllib.error.URLError, ConnectionError, OSError):
+                    time.sleep(1)
+            else:
+                raise BackendError("ollama daemon did not start in time.")
+            print(f"  Pulling ollama model: {tag}")
+            pull = subprocess.run([binary_abs, "pull", tag])
+            if pull.returncode != 0:
+                raise BackendError(f"Failed to pull ollama model: {tag}")
         pid = process.pid
         print(f"  Process started: PID {pid}")
         check_alive = lambda: is_process_alive(pid)
@@ -296,14 +420,35 @@ def start_backend(
     )
 
     # 9. Health check
+    # NIM containers can take 30-60+ minutes on first boot to download
+    # TensorRT-LLM engine files from NGC. After first boot the cache makes it
+    # much faster. Generous timeout protects the cold-start case.
+    health_timeout = 7200 if backend_name == "nim" else 900
+    container_name_for_logs = f"os8-{backend_name}" if container_id else None
     try:
-        _wait_for_healthy(backend.port, check_alive, timeout=900)
-    except (BackendError, KeyboardInterrupt):
+        _wait_for_healthy(
+            backend.port,
+            check_alive,
+            timeout=health_timeout,
+            container_name=container_name_for_logs,
+        )
+    except BackendError as e:
+        print("\n  Cleaning up...")
+        record_failure(model_name, backend_name, str(e))
+        stop_backend()
+        raise
+    except KeyboardInterrupt:
         print("\n  Cleaning up...")
         stop_backend()
         raise
 
-    # 10. Report success
+    # 10. Record verification + report success
+    runtime_id = (
+        model.nim_image
+        or (manifest.fields.get("image") if manifest.fields else None)
+        or manifest.install_type
+    )
+    record_success(model_name, backend_name, runtime=runtime_id)
     print(f"\nBackend ready: {model_name} via {backend_name}")
     print(f"  URL: http://localhost:{backend.port}/v1")
 

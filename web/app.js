@@ -1,6 +1,82 @@
 const API = '/api';
 const POLL_INTERVAL = 3000;
 
+function _showOverlay(html) {
+    let overlay = document.getElementById('dashboard-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'dashboard-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,15,20,0.85);color:#fff;display:flex;align-items:center;justify-content:center;font-family:sans-serif;z-index:9999;backdrop-filter:blur(4px)';
+        document.body.appendChild(overlay);
+    }
+    overlay.innerHTML = `<div style="background:#1f2230;padding:2rem 2.5rem;border-radius:12px;max-width:480px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,0.5)">${html}</div>`;
+    return overlay;
+}
+
+function _hideOverlay() {
+    const overlay = document.getElementById('dashboard-overlay');
+    if (overlay) overlay.remove();
+}
+
+async function stopDashboard() {
+    const overlay = _showOverlay(`
+        <h2 style="margin:0 0 0.75rem;font-size:1.4rem">Stop the dashboard server?</h2>
+        <p style="margin:0 0 1.25rem;opacity:0.85;line-height:1.4">The dashboard process will exit completely. You'll need to run <code style="background:#000;padding:2px 6px;border-radius:4px">./launcher server</code> in a terminal to bring it back.</p>
+        <div style="display:flex;gap:0.75rem;justify-content:center">
+            <button id="overlay-confirm" style="background:#c0392b;color:#fff;border:none;padding:0.6rem 1.2rem;border-radius:6px;font-size:1rem;cursor:pointer">Stop server</button>
+            <button id="overlay-cancel" style="background:#444;color:#fff;border:none;padding:0.6rem 1.2rem;border-radius:6px;font-size:1rem;cursor:pointer">Cancel</button>
+        </div>
+    `);
+    document.getElementById('overlay-cancel').onclick = _hideOverlay;
+    document.getElementById('overlay-confirm').onclick = async () => {
+        _showOverlay(`<h2 style="margin:0 0 0.75rem;font-size:1.4rem">Stopping…</h2><p style="margin:0;opacity:0.85">Sending shutdown signal.</p>`);
+        try {
+            await fetch(API + '/server/stop', { method: 'POST' });
+        } catch (e) { /* expected — server going down */ }
+        // Poll /api/health until it stops responding, then show the final message.
+        const start = Date.now();
+        while (Date.now() - start < 10000) {
+            await new Promise(r => setTimeout(r, 300));
+            try {
+                const res = await fetch(API + '/health', { cache: 'no-store' });
+                if (!res.ok) break;
+            } catch (e) { break; /* down */ }
+        }
+        _showOverlay(`
+            <h2 style="margin:0 0 0.75rem;font-size:1.4rem;color:#e74c3c">Dashboard stopped</h2>
+            <p style="margin:0 0 1rem;opacity:0.85;line-height:1.4">The server process has exited.</p>
+            <p style="margin:0;opacity:0.85;line-height:1.4">Run <code style="background:#000;padding:2px 6px;border-radius:4px">./launcher server</code> in a terminal to start it again.</p>
+        `);
+    };
+}
+
+async function restartDashboard() {
+    _showOverlay(`<h2 style="margin:0 0 0.75rem;font-size:1.4rem">Restarting dashboard…</h2><p id="restart-status" style="margin:0;opacity:0.85">Sending restart signal.</p>`);
+    try {
+        await fetch(API + '/server/restart', { method: 'POST' });
+    } catch (e) { /* expected during the restart window */ }
+    const status = document.getElementById('restart-status');
+    if (status) status.textContent = 'Waiting for server to come back…';
+    const start = Date.now();
+    while (Date.now() - start < 30000) {
+        await new Promise(r => setTimeout(r, 400));
+        try {
+            const res = await fetch(API + '/health', { cache: 'no-store' });
+            if (res.ok) {
+                if (status) status.textContent = 'Reloading page…';
+                await new Promise(r => setTimeout(r, 300));
+                location.reload();
+                return;
+            }
+        } catch (e) { /* still down */ }
+    }
+    _showOverlay(`
+        <h2 style="margin:0 0 0.75rem;font-size:1.4rem;color:#e74c3c">Dashboard did not come back</h2>
+        <p style="margin:0 0 1rem;opacity:0.85;line-height:1.4">No response after 30 seconds. Check the terminal where you ran <code style="background:#000;padding:2px 6px;border-radius:4px">./launcher server</code>.</p>
+        <button onclick="location.reload()" style="background:#444;color:#fff;border:none;padding:0.6rem 1.2rem;border-radius:6px;font-size:1rem;cursor:pointer">Try reloading anyway</button>
+    `);
+}
+
 let modelsData = [];
 let toolsData = [];
 let statusData = { backend: null, clients: {} };
@@ -98,7 +174,7 @@ async function downloadModel(name) {
     await fetch(API + `/models/${name}/download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ backend: 'vllm' }),
+        body: JSON.stringify({}),
     });
     setTimeout(pollModels, 500);
     setTimeout(pollLogs, 500);
@@ -116,8 +192,17 @@ async function setupTool(name) {
 }
 
 async function startClient(name) {
-    await fetch(API + `/clients/${name}`, { method: 'POST' });
+    // Pass the currently-selected model+backend so the launcher can auto-start
+    // a backend if none is running.
+    const model = document.getElementById('model-select')?.value || null;
+    const backend = document.getElementById('backend-select')?.value || null;
+    await fetch(API + `/clients/${name}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, backend }),
+    });
     setTimeout(pollStatus, 500);
+    setTimeout(pollLogs, 500);
 }
 
 async function stopClient(name) {
@@ -134,18 +219,35 @@ function renderModels(models) {
         return;
     }
 
-    let html = '<table><tr><th>Model</th><th>Format</th><th>Status</th><th>Size</th><th></th></tr>';
+    let html = '<table><tr><th>Model</th><th>Format</th><th>Status</th><th>Size</th><th>Verified</th><th></th></tr>';
     for (const m of models) {
-        const statusClass = m.downloaded ? 'status-downloaded' : 'status-not-downloaded';
-        const statusText = m.downloaded ? 'downloaded' : 'not downloaded';
-        const actions = m.downloaded
-            ? `<button class="btn btn-sm btn-danger" onclick="removeModel('${m.name}')">Remove</button>`
-            : `<button class="btn btn-sm btn-primary" onclick="downloadModel('${m.name}')">Download</button>`;
+        let statusClass, statusText, sizeCell, actions;
+        if (m.state === 'downloading') {
+            statusClass = 'status-downloading';
+            const pct = m.expected_bytes ? Math.min(100, (m.size_bytes / m.expected_bytes) * 100) : null;
+            statusText = pct !== null ? `downloading ${pct.toFixed(0)}%` : 'downloading';
+            sizeCell = m.expected_human
+                ? `${m.size_human} / ${m.expected_human}`
+                : m.size_human;
+            actions = `<span class="muted">in progress…</span>`;
+        } else if (m.state === 'downloaded') {
+            statusClass = 'status-downloaded';
+            statusText = 'downloaded';
+            sizeCell = m.size_human;
+            actions = `<button class="btn btn-sm btn-danger" onclick="removeModel('${m.name}')">Remove</button>`;
+        } else {
+            statusClass = 'status-not-downloaded';
+            statusText = 'not downloaded';
+            sizeCell = m.expected_human ? `~${m.expected_human}` : '—';
+            actions = `<button class="btn btn-sm btn-primary" onclick="downloadModel('${m.name}')">Download</button>`;
+        }
+        const verifiedCell = renderVerificationCell(m);
         html += `<tr>
             <td>${m.name}</td>
             <td>${m.format}</td>
             <td class="${statusClass}">${statusText}</td>
-            <td>${m.size_human}</td>
+            <td>${sizeCell}</td>
+            <td>${verifiedCell}</td>
             <td>${actions}</td>
         </tr>`;
     }
@@ -153,17 +255,54 @@ function renderModels(models) {
     el.innerHTML = html;
 }
 
+function renderVerificationCell(m) {
+    const v = m.verification || {};
+    const parts = [];
+    for (const backend of m.backends) {
+        const entry = v[backend];
+        let badge;
+        if (!entry) {
+            badge = `<span class="badge badge-unknown" title="Never attempted on this machine">? ${backend}</span>`;
+        } else if (entry.last_failure) {
+            const tip = `Last failure: ${entry.last_failure}\nAt: ${entry.last_failure_on}` +
+                (entry.verified ? `\nPreviously verified: ${entry.verified_on}` : '');
+            badge = `<span class="badge badge-failed" title="${escapeAttr(tip)}">✗ ${backend}</span>`;
+        } else if (entry.verified) {
+            const tip = `Verified ${entry.verified_on}\nRuntime: ${entry.verified_runtime || 'unknown'}`;
+            badge = `<span class="badge badge-verified" title="${escapeAttr(tip)}">✓ ${backend}</span>`;
+        } else {
+            badge = `<span class="badge badge-unknown" title="Never attempted on this machine">? ${backend}</span>`;
+        }
+        parts.push(badge);
+    }
+    return parts.join(' ');
+}
+
+function escapeAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '&#10;');
+}
+
 function renderModelSelect(models) {
     const sel = document.getElementById('model-select');
     const current = sel.value;
     sel.innerHTML = '<option value="">-- select model --</option>';
-    for (const m of models) {
+    const ready = models.filter(m => m.state === 'downloaded');
+    for (const m of ready) {
         const opt = document.createElement('option');
         opt.value = m.name;
         opt.textContent = m.name;
         sel.appendChild(opt);
     }
-    if (current) sel.value = current;
+    if (ready.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.disabled = true;
+        opt.textContent = '(no models downloaded)';
+        sel.appendChild(opt);
+    }
+    if (current && ready.some(m => m.name === current)) {
+        sel.value = current;
+    }
     updateBackendSelect();
 }
 
@@ -175,10 +314,16 @@ function updateBackendSelect() {
 
     const model = modelsData.find(m => m.name === modelName);
     if (model) {
+        const v = model.verification || {};
         for (const b of model.backends) {
             const opt = document.createElement('option');
             opt.value = b;
-            opt.textContent = b + (b === model.default_backend ? ' (default)' : '');
+            const entry = v[b];
+            let mark;
+            if (entry && entry.last_failure) mark = ' ✗';
+            else if (entry && entry.verified) mark = ' ✓';
+            else mark = ' ?';
+            opt.textContent = b + (b === model.default_backend ? ' (default)' : '') + mark;
             sel.appendChild(opt);
         }
     }
@@ -323,8 +468,15 @@ function renderClients(clients) {
 
 function renderLogs(lines) {
     const el = document.getElementById('log-output');
+    const next = lines.join('\n');
+    // 1. Don't touch the DOM if nothing changed — preserves any active selection.
+    if (el.textContent === next) return;
+    // 2. Don't clobber an active selection inside the log pane — wait for the
+    //    user to copy / click away before re-rendering.
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
     const shouldScroll = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
-    el.textContent = lines.join('\n');
+    el.textContent = next;
     if (shouldScroll) {
         el.scrollTop = el.scrollHeight;
     }

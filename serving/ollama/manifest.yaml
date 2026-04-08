@@ -1,0 +1,15 @@
+name: ollama
+install_type: binary
+# Bundled locally under serving/ollama/. The jetpack6 CUDA plugin in
+# lib/ollama/cuda_jetpack6/ provides GB10/Blackwell acceleration.
+source: https://github.com/ollama/ollama/releases
+binary: serving/ollama/bin/ollama
+# Ollama manages its own model store under ~/.ollama; models are pulled
+# manually with `ollama pull <name>` rather than via the launcher's
+# models download flow.
+# Bind to all interfaces so containers (e.g. open-webui) can reach the daemon
+# via host.docker.internal -> 172.17.0.1 instead of just 127.0.0.1.
+env:
+  OLLAMA_HOST: "0.0.0.0:11434"
+run: "{binary} serve"
+update: "download latest release tarball from github.com/ollama/ollama/releases"

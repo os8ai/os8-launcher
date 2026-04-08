@@ -1,0 +1,6 @@
+# Thin layer over vLLM cu130-nightly that upgrades Transformers to a build
+# new enough to recognize Gemma 4. Remove this image once upstream vLLM bundles
+# a Transformers release with Gemma 4 support.
+FROM vllm/vllm-openai:cu130-nightly
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir -U "git+https://github.com/huggingface/transformers.git"

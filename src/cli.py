@@ -60,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     # --- client ---
     client_parser = subparsers.add_parser("client", help="Start a client")
     client_parser.add_argument("name", help="Client to start")
+    client_parser.add_argument("--model", help="Model to auto-start a backend for if none is running")
+    client_parser.add_argument("--backend", help="Backend to use when auto-starting (default: model's default)")
     client_parser.set_defaults(handler="client")
 
     # --- status ---
@@ -197,7 +199,11 @@ def main(repo_root: Path):
         from src.clients import start_client, ClientError
         try:
             config = load_config(repo_root)
-            start_client(args.name, config, repo_root)
+            start_client(
+                args.name, config, repo_root,
+                model=getattr(args, "model", None),
+                backend_name=getattr(args, "backend", None),
+            )
         except (ConfigError, ClientError) as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -224,6 +230,31 @@ def main(repo_root: Path):
     if handler == "server":
         import uvicorn
         from src.api import app
+        # Clean up any backends/clients left over from a previous launcher run.
+        # State on disk can outlive the actual processes/containers, which causes
+        # "already running" errors on the next action.
+        from src.backends import stop_all
+        try:
+            stop_all()
+        except Exception as e:
+            print(f"  (cleanup warning: {e})")
         print(f"Starting os8-launcher dashboard on http://localhost:{args.port}")
-        uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
+        app.state.restart_requested = False
+        config = uvicorn.Config(app, host="0.0.0.0", port=args.port, log_level="warning")
+        server = uvicorn.Server(config)
+        app.state.server = server
+        server.run()  # blocks until should_exit is set
+        if app.state.restart_requested:
+            # Re-exec the whole process for a clean restart. uvicorn.Server
+            # cannot be reliably re-run inside the same Python process —
+            # leftover asyncio loop state, signal handlers, and background
+            # tasks corrupt the next run(). A fresh interpreter sidesteps
+            # all of that, and the browser's /api/health poll picks us back
+            # up automatically once we bind the port again.
+            import os
+            print("Restarting dashboard...")
+            launcher_path = str(repo_root / "launcher")
+            os.execv(launcher_path, [launcher_path, *sys.argv[1:]])
+            # execv replaces the process — never returns
+        print("Dashboard stopped.")
         return

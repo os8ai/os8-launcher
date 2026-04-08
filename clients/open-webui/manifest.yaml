@@ -2,5 +2,10 @@ name: open-webui
 install_type: container
 image: ghcr.io/open-webui/open-webui:main
 port: 3000
-run: "docker run -p {port}:8080 -e OPENAI_API_BASE_URL=http://host.docker.internal:{backend_port}/v1 {image}"
+# Volume name is templated per-backend so chat history is preserved separately
+# for vllm/ollama/llama.cpp etc., and a fresh backend gets a clean DB that
+# actually picks up the OPENAI_* env vars on first init (Open WebUI ignores
+# env-var changes once a connection is saved to its SQLite store).
+# WEBUI_AUTH=False disables the signup wall so the launcher is one-click.
+run: "docker run --add-host=host.docker.internal:host-gateway -v os8-open-webui-{backend_name}:/app/backend/data -p {port}:8080 -e WEBUI_AUTH=False -e ENABLE_SIGNUP=False -e ENABLE_OLLAMA_API=False -e OPENAI_API_BASE_URLS=http://host.docker.internal:{backend_port}/v1 -e OPENAI_API_KEYS=dummy -e DEFAULT_MODELS={served_model_name} {image}"
 update: "docker pull {image}"

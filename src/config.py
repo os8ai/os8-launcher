@@ -30,6 +30,10 @@ class ModelConfig:
     default_backend: str
     downloaded: bool
     nim_image: str | None = None
+    ollama_tag: str | None = None
+    size_gb: float | None = None
+    backend_env: dict[str, str] = field(default_factory=dict)
+    backend_args: str = ""
 
 
 @dataclass
@@ -121,6 +125,10 @@ def _parse_models(raw: dict) -> dict[str, ModelConfig]:
             default_backend=data["default_backend"],
             downloaded=data.get("downloaded", False),
             nim_image=data.get("nim_image"),
+            ollama_tag=data.get("ollama_tag"),
+            size_gb=data.get("size_gb"),
+            backend_env=data.get("backend_env") or {},
+            backend_args=data.get("backend_args", ""),
         )
     return models
 

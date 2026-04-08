@@ -59,6 +59,15 @@ def _run_with_log_capture(fn, *args, **kwargs):
 app = FastAPI(title="os8-launcher", version="0.1.0")
 
 
+@app.middleware("http")
+async def _no_cache(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
 @app.on_event("startup")
 def startup():
     # Discover repo root from this file's location
@@ -82,6 +91,11 @@ class ServeRequest(BaseModel):
 
 
 class DownloadRequest(BaseModel):
+    backend: str | None = None
+
+
+class ClientStartRequest(BaseModel):
+    model: str | None = None
     backend: str | None = None
 
 
@@ -170,15 +184,26 @@ def api_serve_stop():
 
 
 @app.post("/api/clients/{name}")
-def api_client_start(name: str, background_tasks: BackgroundTasks):
+def api_client_start(
+    name: str,
+    background_tasks: BackgroundTasks,
+    req: ClientStartRequest = None,
+):
     try:
-        _config().get_client(name)
+        config = _config()
+        config.get_client(name)
+        if req and req.model:
+            config.get_model(req.model)
+        if req and req.backend:
+            config.get_backend(req.backend)
     except ConfigError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    model = req.model if req else None
+    backend = req.backend if req else None
     background_tasks.add_task(
         _run_with_log_capture,
-        start_client, name, _config(), _repo_root(),
+        start_client, name, _config(), _repo_root(), model, backend,
     )
     return {"status": "starting"}
 
@@ -226,6 +251,46 @@ def api_tool_setup(name: str, background_tasks: BackgroundTasks):
 def api_stop_all():
     _run_with_log_capture(stop_all)
     return {"status": "stopped"}
+
+
+# --- Dashboard server lifecycle (stop / restart from the UI) ---
+
+@app.get("/api/health")
+def api_health():
+    return {"status": "ok"}
+
+
+def _shutdown_after_response(restart: bool):
+    """Run in a background thread so the HTTP response is flushed first."""
+    import time
+    time.sleep(0.2)
+    # On a plain stop (not restart), tear down any backend/clients we own so
+    # we don't leave orphan containers/processes behind. Restart already gets
+    # this for free via the cleanup at server startup.
+    if not restart:
+        try:
+            stop_all()
+        except Exception as e:
+            print(f"  (cleanup warning: {e})")
+    app.state.restart_requested = restart
+    server = getattr(app.state, "server", None)
+    if server is not None:
+        # force_exit bypasses the graceful-shutdown wait for keep-alive connections,
+        # which the browser dashboard holds open via its 3s status polling.
+        server.should_exit = True
+        server.force_exit = True
+
+
+@app.post("/api/server/stop")
+def api_server_stop(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_shutdown_after_response, False)
+    return {"status": "stopping"}
+
+
+@app.post("/api/server/restart")
+def api_server_restart(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_shutdown_after_response, True)
+    return {"status": "restarting"}
 
 
 # --- Static files (must be last) ---

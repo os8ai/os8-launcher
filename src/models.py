@@ -1,5 +1,6 @@
 """Model weight management — download, list, and remove."""
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -7,6 +8,10 @@ from pathlib import Path
 from src.config import Config, ConfigError, ModelConfig
 from src.credentials import get_ngc_key, get_hf_token, prompt_ngc_key, prompt_hf_token
 from src.preflight import check_docker, check_disk_space, run_checks
+from src.verification import get_for_model
+
+
+DEFAULT_REQUIRED_GB = 5
 
 
 class ModelError(Exception):
@@ -35,13 +40,19 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} PB"
 
 
+DOWNLOADING_MARKER = ".downloading"
+
+
 def _is_downloaded(model: ModelConfig, repo_root: Path) -> bool:
     """Check if model weights are present on disk (not trusting config field)."""
     weights_path = repo_root / model.path
     if not weights_path.exists():
         return False
-    # Has at least one file in it
-    return any(weights_path.rglob("*"))
+    # An in-progress download leaves partial files but the marker is still present.
+    if (weights_path / DOWNLOADING_MARKER).exists():
+        return False
+    # Has at least one file in it (other than the marker)
+    return any(p.name != DOWNLOADING_MARKER for p in weights_path.rglob("*"))
 
 
 # --- data ---
@@ -50,8 +61,18 @@ def get_models_data(config: Config, repo_root: Path) -> list[dict]:
     """Return model info as a list of dicts for JSON serialization."""
     result = []
     for name, model in config.models.items():
+        weights_path = repo_root / model.path
+        downloading = (weights_path / DOWNLOADING_MARKER).exists()
         downloaded = _is_downloaded(model, repo_root)
-        size_bytes = _get_dir_size_bytes(repo_root / model.path)
+        size_bytes = _get_dir_size_bytes(weights_path)
+        # Expected total in bytes, from the declared model.size_gb (GiB).
+        expected_bytes = int(model.size_gb * 1024**3) if model.size_gb else None
+        if downloading:
+            state = "downloading"
+        elif downloaded:
+            state = "downloaded"
+        else:
+            state = "not_downloaded"
         result.append({
             "name": name,
             "source": model.source,
@@ -59,9 +80,13 @@ def get_models_data(config: Config, repo_root: Path) -> list[dict]:
             "backends": model.backends,
             "default_backend": model.default_backend,
             "downloaded": downloaded,
+            "state": state,
             "size_bytes": size_bytes,
             "size_human": _format_size(size_bytes),
+            "expected_bytes": expected_bytes,
+            "expected_human": _format_size(expected_bytes) if expected_bytes else None,
             "nim_image": model.nim_image,
+            "verification": get_for_model(name),
         })
     return result
 
@@ -107,8 +132,55 @@ def download_model(
 
     if target_backend == "nim":
         _download_nim(model, weights_path)
+    elif target_backend == "ollama":
+        _download_ollama(model, config, repo_root, weights_path)
     else:
         _download_huggingface(model, weights_path)
+
+
+def _download_ollama(model: ModelConfig, config: Config, repo_root: Path, weights_path: Path):
+    """Pull a model into ollama's store by briefly running the daemon."""
+    import time
+    import urllib.request
+    import urllib.error
+
+    tag = model.ollama_tag or model.name
+    backend = config.get_backend("ollama")
+    binary_rel = backend.manifest.fields.get("binary") if backend.manifest else None
+    binary_abs = str(repo_root / binary_rel) if binary_rel else "ollama"
+
+    weights_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"Starting ollama daemon...")
+    proc = subprocess.Popen(
+        [binary_abs, "serve"],
+        env={**os.environ, "OLLAMA_HOST": "0.0.0.0:11434"},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(
+                f"http://localhost:{backend.port}/api/version", timeout=2
+            ):
+                break
+        except (urllib.error.URLError, ConnectionError, OSError):
+            time.sleep(1)
+    else:
+        proc.terminate()
+        raise ModelError("ollama daemon did not start in time.")
+
+    print(f"Pulling ollama model: {tag}")
+    pull = subprocess.run([binary_abs, "pull", tag])
+    if pull.returncode != 0:
+        proc.terminate()
+        raise ModelError(f"Failed to pull ollama model: {tag}")
+
+    # Mark as downloaded only after the pull actually succeeded.
+    (weights_path / ".ollama-managed").write_text(f"tag: {tag}\n")
+    # Stop the daemon — the launcher manages lifecycle separately.
+    proc.terminate()
+    print(f"Pulled {tag} into ollama store.")
 
 
 def _download_nim(model: ModelConfig, weights_path: Path):
@@ -124,9 +196,10 @@ def _download_nim(model: ModelConfig, weights_path: Path):
     while not disk_check_path.exists() and disk_check_path != disk_check_path.parent:
         disk_check_path = disk_check_path.parent
 
+    required_gb = (model.size_gb or DEFAULT_REQUIRED_GB) * 1.2
     checks = [
         ("Docker", check_docker()),
-        ("Disk space", check_disk_space(str(disk_check_path), required_gb=100)),
+        ("Disk space", check_disk_space(str(disk_check_path), required_gb=required_gb)),
     ]
     if not run_checks(checks):
         raise ModelError("Prerequisites not met.")
@@ -182,8 +255,9 @@ def _download_huggingface(model: ModelConfig, weights_path: Path):
     while not disk_check_path.exists() and disk_check_path != disk_check_path.parent:
         disk_check_path = disk_check_path.parent
 
+    required_gb = (model.size_gb or DEFAULT_REQUIRED_GB) * 1.2
     checks = [
-        ("Disk space", check_disk_space(str(disk_check_path), required_gb=75)),
+        ("Disk space", check_disk_space(str(disk_check_path), required_gb=required_gb)),
     ]
     if not run_checks(checks):
         raise ModelError("Prerequisites not met.")
@@ -198,34 +272,40 @@ def _download_huggingface(model: ModelConfig, weights_path: Path):
     print()
 
     weights_path.mkdir(parents=True, exist_ok=True)
+    marker = weights_path / DOWNLOADING_MARKER
+    marker.touch()
 
     try:
-        snapshot_download(
-            repo_id=model.source,
-            local_dir=str(weights_path),
-            token=hf_token,
-        )
-    except Exception as e:
-        error_msg = str(e)
-        if "401" in error_msg or "403" in error_msg or "gated" in error_msg.lower():
-            if not hf_token:
-                hf_token = prompt_hf_token()
-                if hf_token:
-                    print("Retrying with token...")
-                    snapshot_download(
-                        repo_id=model.source,
-                        local_dir=str(weights_path),
-                        token=hf_token,
-                    )
-                    print(f"\n{model.name} downloaded successfully.")
-                    return
-            raise ModelError(
-                f"Access denied for {model.source}.\n"
-                f"This model may be gated. Accept the license at:\n"
-                f"  https://huggingface.co/{model.source}\n"
-                f"Then set your HF_TOKEN environment variable."
+        try:
+            snapshot_download(
+                repo_id=model.source,
+                local_dir=str(weights_path),
+                token=hf_token,
             )
-        raise ModelError(f"Download failed: {e}")
+        except Exception as e:
+            error_msg = str(e)
+            if "401" in error_msg or "403" in error_msg or "gated" in error_msg.lower():
+                if not hf_token:
+                    hf_token = prompt_hf_token()
+                    if hf_token:
+                        print("Retrying with token...")
+                        snapshot_download(
+                            repo_id=model.source,
+                            local_dir=str(weights_path),
+                            token=hf_token,
+                        )
+                        print(f"\n{model.name} downloaded successfully.")
+                        return
+                raise ModelError(
+                    f"Access denied for {model.source}.\n"
+                    f"This model may be gated. Accept the license at:\n"
+                    f"  https://huggingface.co/{model.source}\n"
+                    f"Then set your HF_TOKEN environment variable."
+                )
+            raise ModelError(f"Download failed: {e}")
+    finally:
+        if marker.exists():
+            marker.unlink()
 
     print(f"\n{model.name} downloaded successfully.")
 

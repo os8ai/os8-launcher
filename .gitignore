@@ -5,8 +5,9 @@ models/*/weights/
 serving/*/venv/
 clients/*/venv/
 
-# Downloaded binaries
+# Downloaded binaries and shared libs
 serving/*/bin/
+serving/*/lib/
 
 # Python
 __pycache__/
@@ -23,3 +24,4 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+.aider*

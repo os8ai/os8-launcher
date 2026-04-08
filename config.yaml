@@ -1,4 +1,58 @@
 models:
+  # --- primary debug target: tiny, Apache 2.0, no gating, seconds-scale loop ---
+  gemma-4-E2B-it:
+    source: google/gemma-4-E2B-it
+    path: models/gemma-4-E2B-it/weights
+    format: bf16
+    backends: [vllm]
+    default_backend: vllm
+    downloaded: false
+    size_gb: 10
+    backend_env: {}
+    backend_args: "--max-model-len 8192 --gpu-memory-utilization 0.30"
+
+  # --- "real model" target: NVFP4 quantized for Blackwell, vLLM-ready ---
+  gemma-4-31B-it-nvfp4:
+    source: nvidia/Gemma-4-31B-IT-NVFP4
+    path: models/gemma-4-31B-it-nvfp4/weights
+    format: nvfp4
+    backends: [vllm]
+    default_backend: vllm
+    downloaded: false
+    size_gb: 32
+    backend_env:
+      VLLM_NVFP4_GEMM_BACKEND: marlin
+    backend_args: "--quantization modelopt --max-model-len 32768 --gpu-memory-utilization 0.55"
+
+  # --- coding specialist: 80B MoE / 3B active, fp8, 256K context ---
+  qwen3-coder-next:
+    source: Qwen/Qwen3-Coder-Next-FP8
+    path: models/qwen3-coder-next/weights
+    format: fp8
+    backends: [vllm]
+    default_backend: vllm
+    downloaded: false
+    size_gb: 85
+    backend_env: {}
+    backend_args: "--max-model-len 65536 --gpu-memory-utilization 0.80"
+
+  # --- lighter coding sibling: 30B-A3B MoE, served via ollama ---
+  # Ollama manages the weights itself under ~/.ollama, so the `path` here is
+  # only a placeholder marker (the launcher skips the weights check for ollama).
+  qwen3-coder-30b:
+    source: ollama://qwen3-coder:30b
+    path: models/qwen3-coder-30b/weights
+    format: gguf
+    backends: [ollama]
+    default_backend: ollama
+    ollama_tag: qwen3-coder:30b
+    downloaded: false
+    size_gb: 17
+    backend_env: {}
+    backend_args: ""
+
+  # --- advanced/optional: very large, slow cold-start, validated NIM path ---
+  # Kept for the eventual end-to-end NIM validation but not the day-to-day target.
   nemotron-3-super-120b:
     source: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
     nim_image: nvcr.io/nim/nvidia/nemotron-3-super-120b-a12b:latest
@@ -7,6 +61,13 @@ models:
     backends: [nim, vllm]
     default_backend: nim
     downloaded: false
+    size_gb: 75
+    backend_env:
+      VLLM_NVFP4_GEMM_BACKEND: marlin
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      VLLM_FLASHINFER_ALLREDUCE_BACKEND: trtllm
+      VLLM_USE_FLASHINFER_MOE_FP4: "0"
+    backend_args: "--max-model-len 32768 --gpu-memory-utilization 0.85"
 
 backends:
   nim:
@@ -18,6 +79,9 @@ backends:
   llamacpp:
     manifest: serving/llamacpp/manifest.yaml
     port: 8080
+  ollama:
+    manifest: serving/ollama/manifest.yaml
+    port: 11434
 
 clients:
   aider:
