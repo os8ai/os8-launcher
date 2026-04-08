@@ -8,8 +8,10 @@
 </head>
 <body>
     <header>
-        <h1>os8-launcher</h1>
+        <h1><a href="/" style="color:inherit;text-decoration:none">os8-launcher</a></h1>
         <span class="subtitle">local AI model management</span>
+        <span id="active-project-indicator" class="subtitle" style="margin-left:1em"></span>
+        <button class="btn-settings" onclick="window.location='/projects.html'" title="Switch project">Projects</button>
         <button class="btn-settings" onclick="restartDashboard()" title="Restart this dashboard server">Restart</button>
         <button class="btn-settings" onclick="stopDashboard()" title="Stop this dashboard server">Stop server</button>
         <button class="btn-settings" onclick="openSettings()" title="API Keys">Settings</button>

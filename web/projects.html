@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>os8-launcher · projects</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1><a href="/" style="color:inherit;text-decoration:none">os8-launcher</a></h1>
+        <span class="subtitle">choose a project</span>
+    </header>
+
+    <main>
+        <div class="panel" id="panel-projects">
+            <h2>Projects</h2>
+            <div id="projects-dir-hint" class="client-hint"></div>
+            <div id="projects-list">Loading...</div>
+        </div>
+
+        <div class="panel" id="panel-new-project">
+            <h2>New project</h2>
+            <div class="control-group">
+                <label for="new-name">Name</label>
+                <input type="text" id="new-name" placeholder="my-app">
+            </div>
+            <div class="control-group">
+                <label for="new-desc">Description (optional)</label>
+                <input type="text" id="new-desc" placeholder="What you're building">
+            </div>
+            <div class="control-actions">
+                <button class="btn btn-primary" onclick="createProject()">Create &amp; open</button>
+            </div>
+            <div id="new-error" class="client-hint" style="display:none;color:#c33"></div>
+        </div>
+    </main>
+
+    <script>
+    async function loadProjects() {
+        const r = await fetch('/api/projects');
+        const data = await r.json();
+        document.getElementById('projects-dir-hint').textContent =
+            'Projects live in ' + data.projects_dir;
+
+        const list = document.getElementById('projects-list');
+        if (!data.projects.length) {
+            list.innerHTML = '<div class="client-hint">No projects yet. Create one below.</div>';
+            return;
+        }
+        list.innerHTML = '';
+        for (const p of data.projects) {
+            const row = document.createElement('div');
+            row.className = 'control-group';
+            const isActive = p.name === data.active;
+            row.innerHTML =
+                '<div style="display:flex;justify-content:space-between;align-items:center;gap:1em">' +
+                  '<div>' +
+                    '<strong>' + p.name + (isActive ? ' (active)' : '') + '</strong>' +
+                    (p.description ? '<div class="key-help">' + p.description + '</div>' : '') +
+                    '<div class="key-help">' + p.path + '</div>' +
+                  '</div>' +
+                  '<div style="display:flex;gap:0.5em">' +
+                    '<button class="btn" data-action="rename">Rename</button>' +
+                    '<button class="btn btn-primary" data-action="open">Open</button>' +
+                  '</div>' +
+                '</div>';
+            row.querySelector('[data-action="open"]').onclick = () => openProject(p.name);
+            row.querySelector('[data-action="rename"]').onclick = () => renameProject(p.name);
+            list.appendChild(row);
+        }
+    }
+
+    async function renameProject(oldName) {
+        const newName = prompt('Rename project "' + oldName + '" to:', oldName);
+        if (!newName || newName === oldName) return;
+        const r = await fetch('/api/projects/' + encodeURIComponent(oldName), {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({new_name: newName.trim()}),
+        });
+        if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            alert(data.detail || 'Rename failed');
+            return;
+        }
+        loadProjects();
+    }
+
+    async function openProject(name) {
+        await fetch('/api/projects/active', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name}),
+        });
+        window.location = '/';
+    }
+
+    async function createProject() {
+        const name = document.getElementById('new-name').value.trim();
+        const description = document.getElementById('new-desc').value.trim();
+        const err = document.getElementById('new-error');
+        err.style.display = 'none';
+        if (!name) { err.textContent = 'Name required'; err.style.display = 'block'; return; }
+        const r = await fetch('/api/projects', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name, description: description || null}),
+        });
+        if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            err.textContent = data.detail || 'Failed to create project';
+            err.style.display = 'block';
+            return;
+        }
+        window.location = '/';
+    }
+
+    loadProjects();
+    </script>
+</body>
+</html>

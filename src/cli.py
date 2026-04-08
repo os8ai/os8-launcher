@@ -74,6 +74,30 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("--client", help="Stop only this client")
     stop_parser.set_defaults(handler="stop")
 
+    # --- project ---
+    project_parser = subparsers.add_parser("project", help="Manage project folders")
+    project_sub = project_parser.add_subparsers(dest="project_command")
+
+    p_list = project_sub.add_parser("list", help="List projects")
+    p_list.set_defaults(handler="project_list")
+
+    p_new = project_sub.add_parser("new", help="Create a new project")
+    p_new.add_argument("name")
+    p_new.add_argument("--description", default=None)
+    p_new.set_defaults(handler="project_new")
+
+    p_use = project_sub.add_parser("use", help="Set the active project")
+    p_use.add_argument("name")
+    p_use.set_defaults(handler="project_use")
+
+    p_clear = project_sub.add_parser("clear", help="Clear the active project")
+    p_clear.set_defaults(handler="project_clear")
+
+    p_show = project_sub.add_parser("show", help="Show the active project")
+    p_show.set_defaults(handler="project_show")
+
+    project_parser.set_defaults(handler="project_help", _parser=project_parser)
+
     # --- server ---
     server_parser = subparsers.add_parser("server", help="Start the web dashboard")
     server_parser.add_argument("--port", type=int, default=9000, help="Port for the dashboard (default: 9000)")
@@ -99,6 +123,58 @@ def main(repo_root: Path):
     if handler == "models_help":
         args._parser.print_help()
         return
+    if handler == "project_help":
+        args._parser.print_help()
+        return
+
+    # --- project commands ---
+    if handler and handler.startswith("project_"):
+        from src.projects import (
+            ProjectError, list_projects, create_project,
+            set_active_project, clear_active_project, get_active_project,
+            projects_dir,
+        )
+        try:
+            if handler == "project_list":
+                active = get_active_project()
+                active_name = active.name if active else None
+                projects = list_projects()
+                if not projects:
+                    print(f"No projects yet under {projects_dir()}.")
+                    print("Create one with: ./launcher project new <name>")
+                    return
+                print(f"Projects (in {projects_dir()}):")
+                for p in projects:
+                    marker = "* " if p.name == active_name else "  "
+                    print(f"{marker}{p.name}")
+                return
+            if handler == "project_new":
+                p = create_project(args.name, description=args.description)
+                set_active_project(p.name)
+                print(f"Created and activated project: {p.name}")
+                print(f"  Path: {p.path}")
+                return
+            if handler == "project_use":
+                p = set_active_project(args.name)
+                print(f"Active project: {p.name} ({p.path})")
+                return
+            if handler == "project_clear":
+                clear_active_project()
+                print("Active project cleared.")
+                return
+            if handler == "project_show":
+                p = get_active_project()
+                if not p:
+                    print("No active project. Set one with: ./launcher project use <name>")
+                    return
+                print(f"Active project: {p.name}")
+                print(f"  Path: {p.path}")
+                if p.description:
+                    print(f"  Description: {p.description}")
+                return
+        except ProjectError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # --- config show ---
     if handler == "config_show":

@@ -63,7 +63,7 @@ def _get_running_backend(state: dict) -> dict:
     return backend
 
 
-def _start_attached(cmd_string: str, venv_path: Path | None):
+def _start_attached(cmd_string: str, venv_path: Path | None, cwd: Path | None = None):
     """Start a client in the foreground (attached to terminal)."""
     cmd = parse_command(cmd_string)
 
@@ -72,7 +72,7 @@ def _start_attached(cmd_string: str, venv_path: Path | None):
         env = build_env_for_venv(venv_path)
 
     try:
-        subprocess.run(cmd, env=env)
+        subprocess.run(cmd, env=env, cwd=str(cwd) if cwd else None)
     except KeyboardInterrupt:
         print()
 
@@ -189,10 +189,18 @@ def _start_client_inner(
                     f"Run: ./launcher setup {client_name}"
                 )
 
+        from src.projects import get_active_project
+        active = get_active_project()
+        cwd = active.path if active else None
+
         print(f"Starting {client_name}...")
         print(f"  Connected to {backend['name']} ({backend_model}) on port {backend_port}")
+        if active:
+            print(f"  Project: {active.name} ({active.path})")
+        else:
+            print("  Project: (none — running in launcher repo cwd)")
         print()
-        _start_attached(cmd_string, venv_path)
+        _start_attached(cmd_string, venv_path, cwd=cwd)
         return
 
     # --- container + detached ---

@@ -25,6 +25,12 @@ from src.installer import (
 from src.models import (
     get_models_data, download_model, remove_model, ModelError,
 )
+from src.projects import (
+    list_projects, create_project, get_active_project,
+    set_active_project, clear_active_project, projects_dir,
+    rename_project, ensure_active_project, update_last_selection,
+    ProjectError,
+)
 
 # --- Log buffer ---
 
@@ -106,6 +112,19 @@ class ClientStartRequest(BaseModel):
     backend: str | None = None
 
 
+class ProjectCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class ProjectActivateRequest(BaseModel):
+    name: str
+
+
+class ProjectRenameRequest(BaseModel):
+    new_name: str
+
+
 class CredentialsRequest(BaseModel):
     ngc_api_key: str | None = None
     hf_token: str | None = None
@@ -131,6 +150,67 @@ def api_credentials_set(req: CredentialsRequest):
         "ngc": bool(get_ngc_key()),
         "hf": bool(get_hf_token()),
     }
+
+
+# --- Projects endpoints ---
+
+def _project_payload(p):
+    return {
+        "name": p.name,
+        "path": str(p.path),
+        "description": p.description,
+        "created_at": p.created_at,
+        "last_model": p.default_model,
+        "last_backend": p.default_backend,
+        "last_client": p.default_client,
+    }
+
+
+@app.get("/api/projects")
+def api_projects_list():
+    # Make sure there's always an active project — auto-create "default"
+    # on a fresh install, or activate the most-recently-used one.
+    active = ensure_active_project()
+    return {
+        "projects_dir": str(projects_dir()),
+        "active": active.name,
+        "active_project": _project_payload(active),
+        "projects": [_project_payload(p) for p in list_projects()],
+    }
+
+
+@app.post("/api/projects")
+def api_projects_create(req: ProjectCreateRequest):
+    try:
+        p = create_project(req.name, description=req.description)
+        set_active_project(p.name)
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _project_payload(p)
+
+
+@app.put("/api/projects/active")
+def api_projects_activate(req: ProjectActivateRequest):
+    try:
+        p = set_active_project(req.name)
+    except ProjectError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _project_payload(p)
+
+
+@app.delete("/api/projects/active")
+def api_projects_deactivate():
+    clear_active_project()
+    return {"status": "cleared"}
+
+
+@app.put("/api/projects/{name}")
+def api_projects_rename(name: str, req: ProjectRenameRequest):
+    try:
+        p = rename_project(name, req.new_name)
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _project_payload(p)
 
 
 # --- Read-only endpoints ---
@@ -187,6 +267,15 @@ def api_serve(req: ServeRequest, background_tasks: BackgroundTasks):
     except ConfigError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    active = get_active_project()
+    if active:
+        update_last_selection(
+            active.name,
+            model=req.model,
+            backend=req.backend or "",
+            client=req.client or "",
+        )
+
     background_tasks.add_task(
         _run_with_log_capture,
         _serve_sequential, req.model, req.backend, req.client,
@@ -238,6 +327,16 @@ def api_client_start(
 
     model = req.model if req else None
     backend = req.backend if req else None
+
+    active = get_active_project()
+    if active:
+        update_last_selection(
+            active.name,
+            model=model,
+            backend=backend or "",
+            client=name,
+        )
+
     background_tasks.add_task(
         _run_with_log_capture,
         start_client, name, _config(), _repo_root(), model, backend,

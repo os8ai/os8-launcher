@@ -1,6 +1,54 @@
 const API = '/api';
 const POLL_INTERVAL = 3000;
 
+// Active project + remembered selections. The server auto-creates a
+// "default" project if none exists, so this never has to redirect.
+let pendingProjectDefaults = null;  // {model, backend, client}
+
+(async function loadActiveProject() {
+    try {
+        const r = await fetch('/api/projects');
+        if (!r.ok) return;
+        const data = await r.json();
+        const indicator = document.getElementById('active-project-indicator');
+        if (indicator && data.active) indicator.textContent = '· project: ' + data.active;
+        const p = data.active_project;
+        if (p) {
+            pendingProjectDefaults = {
+                model: p.last_model || '',
+                backend: p.last_backend || '',
+                client: p.last_client || '',
+            };
+        }
+    } catch (e) { /* ignore — dashboard will still load */ }
+})();
+
+function applyProjectDefaults() {
+    // Called from renderModelSelect / renderClientSelect after each
+    // populates its <select>. We apply each piece once and then null it
+    // out so user choices are never overwritten on later polls.
+    if (!pendingProjectDefaults) return;
+    const d = pendingProjectDefaults;
+    const modelSel = document.getElementById('model-select');
+    const clientSel = document.getElementById('client-select');
+    if (d.model && modelSel && [...modelSel.options].some(o => o.value === d.model)) {
+        modelSel.value = d.model;
+        modelSel.dispatchEvent(new Event('change'));
+        d.model = '';
+    }
+    const backendSel = document.getElementById('backend-select');
+    if (d.backend && backendSel && [...backendSel.options].some(o => o.value === d.backend)) {
+        backendSel.value = d.backend;
+        d.backend = '';
+    }
+    if (d.client && clientSel && [...clientSel.options].some(o => o.value === d.client)) {
+        clientSel.value = d.client;
+        clientSel.dispatchEvent(new Event('change'));
+        d.client = '';
+    }
+    if (!d.model && !d.backend && !d.client) pendingProjectDefaults = null;
+}
+
 function _showOverlay(html) {
     let overlay = document.getElementById('dashboard-overlay');
     if (!overlay) {
@@ -437,6 +485,7 @@ function renderModelSelect(models) {
         sel.value = current;
     }
     updateBackendSelect();
+    applyProjectDefaults();
 }
 
 function updateBackendSelect() {
@@ -480,6 +529,7 @@ function renderClientSelect(tools) {
     }
     if (current) sel.value = current;
     updateClientHint();
+    applyProjectDefaults();
 }
 
 function updateClientHint() {
