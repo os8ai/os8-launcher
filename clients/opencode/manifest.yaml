@@ -1,0 +1,18 @@
+name: opencode
+install_type: binary
+binary: clients/opencode/bin/opencode
+source: https://opencode.ai/install
+# The official installer hardcodes ~/.opencode/bin as the install location, so
+# we run it as-is and then symlink the binary into the per-client tree to match
+# the convention used by aider/open-webui.
+install_cmd: "curl -fsSL https://opencode.ai/install | bash && mkdir -p clients/opencode/bin && ln -sf $HOME/.opencode/bin/opencode clients/opencode/bin/opencode"
+update_cmd: "curl -fsSL https://opencode.ai/install | bash"
+run: "clients/opencode/bin/opencode"
+# opencode takes its provider config via OPENCODE_CONFIG_CONTENT (inline JSON).
+# We point it at the running backend's OpenAI-compatible endpoint via the
+# @ai-sdk/openai-compatible provider, which opencode fetches on first run.
+# Template variables {port} and {served_model_name} are filled in at launch by
+# clients.py — note these are NOT format-string substitutions, so the literal
+# JSON braces below are safe.
+env:
+  OPENCODE_CONFIG_CONTENT: '{"$schema":"https://opencode.ai/config.json","provider":{"local":{"npm":"@ai-sdk/openai-compatible","name":"OS8 Local","options":{"baseURL":"http://localhost:{port}/v1","apiKey":"dummy"},"models":{"{served_model_name}":{"name":"{served_model_name}"}}}},"model":"local/{served_model_name}"}'

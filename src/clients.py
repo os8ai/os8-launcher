@@ -63,13 +63,23 @@ def _get_running_backend(state: dict) -> dict:
     return backend
 
 
-def _start_attached(cmd_string: str, venv_path: Path | None, cwd: Path | None = None):
+def _start_attached(
+    cmd_string: str,
+    venv_path: Path | None,
+    cwd: Path | None = None,
+    extra_env: dict | None = None,
+):
     """Start a client in the foreground (attached to terminal)."""
     cmd = parse_command(cmd_string)
 
     env = None
     if venv_path:
         env = build_env_for_venv(venv_path)
+    if extra_env:
+        import os as _os
+        if env is None:
+            env = _os.environ.copy()
+        env.update(extra_env)
 
     try:
         subprocess.run(cmd, env=env, cwd=str(cwd) if cwd else None)
@@ -177,6 +187,19 @@ def _start_client_inner(
 
     cmd_string = expand_template(run_template, variables)
 
+    # Manifest-defined env vars (templated). Used for clients like opencode
+    # that take their config via an env var instead of CLI flags. Values are
+    # plain string-replaced (not .format()) so JSON braces don't collide
+    # with the template-variable syntax.
+    manifest_env: dict[str, str] = {}
+    raw_env = manifest.fields.get("env") or {}
+    if isinstance(raw_env, dict):
+        for k, v in raw_env.items():
+            sv = str(v)
+            for var_k, var_v in variables.items():
+                sv = sv.replace("{" + var_k + "}", var_v)
+            manifest_env[str(k)] = sv
+
     # --- pip + attached ---
     if manifest.install_type == "pip":
         venv_rel = manifest.fields.get("venv")
@@ -200,7 +223,38 @@ def _start_client_inner(
         else:
             print("  Project: (none — running in launcher repo cwd)")
         print()
-        _start_attached(cmd_string, venv_path, cwd=cwd)
+        _start_attached(cmd_string, venv_path, cwd=cwd, extra_env=manifest_env or None)
+        return
+
+    # --- binary + attached ---
+    if manifest.install_type == "binary":
+        binary_rel = manifest.fields.get("binary")
+        if not binary_rel:
+            raise ClientError(
+                f"Manifest for '{client_name}' missing 'binary' field."
+            )
+        binary_path = (repo_root / binary_rel).resolve()
+        if not binary_path.exists():
+            raise ClientError(
+                f"Client '{client_name}' is not installed.\n"
+                f"Run: ./launcher setup {client_name}"
+            )
+        # The client may run in a project cwd, so the relative binary path
+        # in the manifest won't resolve. Replace it with the absolute path.
+        cmd_string = cmd_string.replace(binary_rel, str(binary_path), 1)
+
+        from src.projects import get_active_project
+        active = get_active_project()
+        cwd = active.path if active else None
+
+        print(f"Starting {client_name}...")
+        print(f"  Connected to {backend['name']} ({backend_model}) on port {backend_port}")
+        if active:
+            print(f"  Project: {active.name} ({active.path})")
+        else:
+            print("  Project: (none — running in launcher repo cwd)")
+        print()
+        _start_attached(cmd_string, None, cwd=cwd, extra_env=manifest_env or None)
         return
 
     # --- container + detached ---

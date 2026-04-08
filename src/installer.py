@@ -206,23 +206,41 @@ def _update_container(manifest: ManifestConfig, config: Config):
 # --- binary install type ---
 
 def _install_binary(manifest: ManifestConfig, repo_root: Path):
-    """Download a binary release."""
+    """Install a binary tool. If the manifest provides an `install_cmd`, run
+    it via the shell (so pipes/redirects work). Otherwise fall back to
+    printing manual download instructions.
+    """
     binary_rel = manifest.fields.get("binary")
     source = manifest.fields.get("source")
+    install_cmd = manifest.fields.get("install_cmd")
 
-    if not binary_rel or not source:
+    if not binary_rel:
         raise InstallError(
-            f"Manifest for '{manifest.name}' missing 'binary' or 'source' field."
+            f"Manifest for '{manifest.name}' missing 'binary' field."
         )
 
     binary_path = repo_root / binary_rel
     binary_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # For now, print instructions. Automating GitHub release downloads for the
-    # correct platform (linux-aarch64) requires parsing the GitHub API, which
-    # is straightforward but specific to each project's release naming.
+    if install_cmd:
+        print(f"  Running install command for {manifest.name}...")
+        print(f"  $ {install_cmd}")
+        result = subprocess.run(
+            install_cmd, shell=True, cwd=str(repo_root), timeout=600,
+        )
+        if result.returncode != 0:
+            raise InstallError(f"Install command for {manifest.name} failed.")
+        if not binary_path.exists():
+            raise InstallError(
+                f"Install command for {manifest.name} succeeded but "
+                f"{binary_rel} is not present."
+            )
+        print(f"  {manifest.name} installed successfully.")
+        return
+
     print(f"  Binary install for {manifest.name}:")
-    print(f"    Download from: {source}")
+    if source:
+        print(f"    Download from: {source}")
     print(f"    Platform: linux-aarch64")
     print(f"    Place binary at: {binary_rel}")
     print(f"    Make executable: chmod +x {binary_rel}")
@@ -232,7 +250,20 @@ def _install_binary(manifest: ManifestConfig, repo_root: Path):
 
 
 def _update_binary(manifest: ManifestConfig, repo_root: Path):
-    """Update a binary (same as install)."""
+    """Update a binary. Uses `update_cmd` if present, else `install_cmd`."""
+    update_cmd = manifest.fields.get("update_cmd") or manifest.fields.get("install_cmd")
+    if update_cmd:
+        # Temporarily swap install_cmd so _install_binary runs the right thing.
+        original = manifest.fields.get("install_cmd")
+        manifest.fields["install_cmd"] = update_cmd
+        try:
+            _install_binary(manifest, repo_root)
+        finally:
+            if original is None:
+                manifest.fields.pop("install_cmd", None)
+            else:
+                manifest.fields["install_cmd"] = original
+        return
     _install_binary(manifest, repo_root)
 
 

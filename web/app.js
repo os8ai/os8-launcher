@@ -522,7 +522,7 @@ function renderClientSelect(tools) {
         const opt = document.createElement('option');
         opt.value = c.name;
         let label = c.name;
-        if (c.install_type === 'pip') label += ' (terminal)';
+        if (c.install_type === 'pip' || c.install_type === 'binary') label += ' (terminal)';
         if (c.install_type === 'bridge') label += ' (bridge)';
         opt.textContent = label;
         sel.appendChild(opt);
@@ -547,7 +547,7 @@ function updateClientHint() {
         return;
     }
 
-    if (tool.install_type === 'pip') {
+    if (tool.install_type === 'pip' || tool.install_type === 'binary') {
         hint.style.display = 'block';
         hint.innerHTML = `<strong>${clientName}</strong> is a terminal app. After serving, run in your terminal:<br><code>./launcher client ${clientName}</code>`;
     } else if (tool.install_type === 'bridge') {

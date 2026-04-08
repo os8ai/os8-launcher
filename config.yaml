@@ -86,6 +86,8 @@ backends:
 clients:
   aider:
     manifest: clients/aider/manifest.yaml
+  opencode:
+    manifest: clients/opencode/manifest.yaml
   open-webui:
     manifest: clients/open-webui/manifest.yaml
     port: 3000
