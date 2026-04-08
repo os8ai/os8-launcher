@@ -21,7 +21,7 @@ function _hideOverlay() {
 async function stopDashboard() {
     const overlay = _showOverlay(`
         <h2 style="margin:0 0 0.75rem;font-size:1.4rem">Stop the dashboard server?</h2>
-        <p style="margin:0 0 1.25rem;opacity:0.85;line-height:1.4">The dashboard process will exit completely. You'll need to run <code style="background:#000;padding:2px 6px;border-radius:4px">./launcher server</code> in a terminal to bring it back.</p>
+        <p style="margin:0 0 1.25rem;opacity:0.85;line-height:1.4">The dashboard process will exit completely. You'll need to run <code style="background:#000;padding:2px 6px;border-radius:4px">os8-launcher</code> in a terminal to bring it back.</p>
         <div style="display:flex;gap:0.75rem;justify-content:center">
             <button id="overlay-confirm" style="background:#c0392b;color:#fff;border:none;padding:0.6rem 1.2rem;border-radius:6px;font-size:1rem;cursor:pointer">Stop server</button>
             <button id="overlay-cancel" style="background:#444;color:#fff;border:none;padding:0.6rem 1.2rem;border-radius:6px;font-size:1rem;cursor:pointer">Cancel</button>
@@ -45,7 +45,7 @@ async function stopDashboard() {
         _showOverlay(`
             <h2 style="margin:0 0 0.75rem;font-size:1.4rem;color:#e74c3c">Dashboard stopped</h2>
             <p style="margin:0 0 1rem;opacity:0.85;line-height:1.4">The server process has exited.</p>
-            <p style="margin:0;opacity:0.85;line-height:1.4">Run <code style="background:#000;padding:2px 6px;border-radius:4px">./launcher server</code> in a terminal to start it again.</p>
+            <p style="margin:0;opacity:0.85;line-height:1.4">Run <code style="background:#000;padding:2px 6px;border-radius:4px">os8-launcher</code> in a terminal to start it again.</p>
         `);
     };
 }
@@ -524,29 +524,47 @@ function renderSession(status) {
         const b = status.backend;
         const dotClass = b.health === 'healthy' ? 'dot-healthy' : 'dot-unhealthy';
         const healthClass = b.health === 'healthy' ? 'status-healthy' : 'status-unhealthy';
-        html += `<div class="session-info">
+        const baseUrl = `http://localhost:${b.port}`;
+        const apiBase = `${baseUrl}/v1`;
+        const endpoints = [
+            `${apiBase}/models`,
+            `${apiBase}/chat/completions`,
+            `${apiBase}/completions`,
+            `${apiBase}/embeddings`,
+        ];
+        const endpointsHtml = endpoints
+            .map(e => `<div style="font-family:monospace;font-size:0.85em;opacity:0.8;margin-left:1rem">${e}</div>`)
+            .join('');
+        html += `<h3>Backend</h3>
+        <div class="session-info">
             <div><span class="label">Backend:</span> ${b.name}</div>
             <div><span class="label">Model:</span> ${b.model}</div>
-            <div><span class="label">URL:</span> <a href="http://localhost:${b.port}/v1" style="color:#5e7ce2">http://localhost:${b.port}/v1</a></div>
+            <div><span class="label">URL:</span> <a href="${baseUrl}" target="_blank" style="color:#5e7ce2">${baseUrl}</a></div>
+            <div><span class="label">API base:</span> <span style="font-family:monospace">${apiBase}</span></div>
+            <div style="margin-top:0.25rem"><span class="label">Endpoints:</span>${endpointsHtml}</div>
             <div><span class="label">Health:</span> <span class="dot ${dotClass}"></span><span class="${healthClass}">${b.health}</span></div>
             <div><span class="label">Uptime:</span> ${b.uptime}</div>
             <div style="margin-top:0.5rem"><button class="btn btn-sm btn-danger" onclick="stopBackendOnly()">Stop backend</button></div>
         </div>`;
     }
 
-    const clientNames = Object.keys(status.clients);
-    if (clientNames.length > 0) {
-        html += '<h3>Clients</h3><table><tr><th>Name</th><th>Port</th><th>Uptime</th><th></th></tr>';
-        for (const name of clientNames) {
-            const c = status.clients[name];
-            html += `<tr>
-                <td>${name}</td>
-                <td>${c.port || '-'}</td>
-                <td>${c.uptime}</td>
-                <td><button class="btn btn-sm btn-danger" onclick="stopClient('${name}')">Stop</button></td>
-            </tr>`;
+    for (const name of Object.keys(status.clients)) {
+        const c = status.clients[name];
+        let urlLine;
+        if (c.port) {
+            urlLine = c.ready
+                ? `<a href="http://localhost:${c.port}" target="_blank" style="color:#5e7ce2">http://localhost:${c.port}</a>`
+                : `<span style="opacity:0.6">starting…</span>`;
+        } else {
+            urlLine = '-';
         }
-        html += '</table>';
+        html += `<h3>Client</h3>
+        <div class="session-info">
+            <div><span class="label">Client:</span> ${name}</div>
+            <div><span class="label">URL:</span> ${urlLine}</div>
+            <div><span class="label">Uptime:</span> ${c.uptime}</div>
+            <div style="margin-top:0.5rem"><button class="btn btn-sm btn-danger" onclick="stopClient('${name}')">Stop client</button></div>
+        </div>`;
     }
 
     el.innerHTML = html;

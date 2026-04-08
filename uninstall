@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Remove the os8-launcher symlink installed by ./install. Only removes the
+# link if it actually points back at this repo's ./start — never touches an
+# unrelated file with the same name.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+LINK="${HOME}/.local/bin/os8-launcher"
+SOURCE="${REPO_ROOT}/start"
+
+if [[ ! -L "$LINK" && ! -e "$LINK" ]]; then
+  echo "Nothing to remove: ${LINK} does not exist."
+  exit 0
+fi
+
+if [[ ! -L "$LINK" ]]; then
+  echo "Refusing to remove ${LINK}: not a symlink." >&2
+  echo "Remove it manually if you're sure." >&2
+  exit 1
+fi
+
+target="$(readlink "$LINK")"
+if [[ "$target" != "$SOURCE" ]]; then
+  echo "Refusing to remove ${LINK}: it points to ${target}, not this repo (${SOURCE})." >&2
+  exit 1
+fi
+
+rm "$LINK"
+echo "Removed: ${LINK}"

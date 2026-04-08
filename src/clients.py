@@ -1,6 +1,10 @@
 """Client launcher — start clients connected to a running backend."""
 
+import socket
 import subprocess
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from src.actionlog import log_start, log_ready, log_stopped, log_fail
@@ -10,9 +14,38 @@ from src.runtime import check_port, expand_template, build_env_for_venv, parse_c
 from src.state import (
     validate_state,
     set_client,
+    mark_client_ready,
     clear_client,
     is_container_running,
 )
+
+
+def _wait_for_client_port(port: int, container_id: str, timeout: int = 120) -> bool:
+    """Poll a client's port until it accepts an HTTP response, or the
+    container dies, or the timeout expires.
+
+    A bare TCP-accept isn't enough — Open WebUI binds the port well before
+    its app is actually serving, and a click during that window still 502s.
+    We require an HTTP response (any status code) to call it ready.
+
+    Returns True if ready, False on timeout or container death.
+    """
+    url = f"http://localhost:{port}/"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not is_container_running(container_id):
+            return False
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=2):
+                return True
+        except urllib.error.HTTPError:
+            # Any HTTP status — including 4xx/5xx — means the app is up
+            # enough to respond. Good enough to expose the link.
+            return True
+        except (urllib.error.URLError, socket.timeout, ConnectionError, OSError):
+            time.sleep(1)
+    return False
 
 
 class ClientError(Exception):
@@ -191,16 +224,27 @@ def _start_client_inner(
         container_id = _start_detached_container(cmd_string, client_name)
         print(f"  Container started: {container_id[:12]}")
 
-        # Record in state
+        # Record in state immediately so the user sees the row in Active
+        # Session and can stop it if needed — but mark ready=False so the
+        # frontend hides the URL until the app is actually serving.
         set_client(
             name=client_name,
             port=target_port or 0,
             install_type="container",
             container_id=container_id,
+            ready=not target_port,  # no port → nothing to wait for
         )
 
         if target_port:
-            print(f"  {client_name} running at http://localhost:{target_port}")
+            print(f"  Waiting for {client_name} to accept connections on port {target_port}...")
+            if _wait_for_client_port(target_port, container_id):
+                mark_client_ready(client_name)
+                print(f"  {client_name} ready at http://localhost:{target_port}")
+            else:
+                print(
+                    f"  {client_name} did not become ready in time. "
+                    f"It may still come up — check 'docker logs os8-{client_name}'."
+                )
         return
 
     raise ClientError(f"Unknown install_type '{manifest.install_type}' for client '{client_name}'.")

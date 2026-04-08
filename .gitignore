@@ -25,3 +25,6 @@ __pycache__/
 .vscode/
 .idea/
 .aider*
+
+# Runtime logs from ./start
+var/

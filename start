@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Convenience launcher: ./start (or ./launch) — bring the os8-launcher
+# dashboard up on http://localhost:PORT, with friendly handling for the
+# "something is already there" cases.
+set -euo pipefail
+
+PORT="${OS8_LAUNCHER_PORT:-9000}"
+URL="http://localhost:${PORT}"
+REPO_ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+cd "$REPO_ROOT"
+
+# 1. Is *our* dashboard already up? /api/health is served by src/api.py.
+if curl -fsS --max-time 2 "${URL}/api/health" >/dev/null 2>&1; then
+  echo "os8-launcher is already running."
+  echo "  ${URL}"
+  exit 0
+fi
+
+# 2. Is *something else* bound to the port?
+#    Use ss (no sudo needed for own procs; falls back gracefully).
+holder_pid=""
+if command -v ss >/dev/null 2>&1; then
+  holder_pid="$(ss -ltnpH "sport = :${PORT}" 2>/dev/null \
+                 | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2 || true)"
+fi
+if [[ -z "$holder_pid" ]] && command -v lsof >/dev/null 2>&1; then
+  holder_pid="$(lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
+fi
+
+if [[ -n "$holder_pid" ]]; then
+  holder_cmd="$(ps -p "$holder_pid" -o args= 2>/dev/null || echo '?')"
+  echo "Port ${PORT} is in use by PID ${holder_pid}:"
+  echo "  ${holder_cmd}"
+  read -r -p "Kill it and start os8-launcher? [y/N] " answer
+  case "$answer" in
+    y|Y|yes|YES)
+      kill "$holder_pid" 2>/dev/null || true
+      # Give it a moment to release the port; escalate if it doesn't.
+      for _ in 1 2 3 4 5; do
+        sleep 0.5
+        if ! kill -0 "$holder_pid" 2>/dev/null; then break; fi
+      done
+      if kill -0 "$holder_pid" 2>/dev/null; then
+        echo "  PID ${holder_pid} still alive — sending SIGKILL."
+        kill -9 "$holder_pid" 2>/dev/null || true
+        sleep 0.5
+      fi
+      ;;
+    *)
+      echo "Aborted. Nothing changed."
+      exit 1
+      ;;
+  esac
+fi
+
+# 3. Start the dashboard in the background, capture logs for inspection.
+mkdir -p "${REPO_ROOT}/var"
+LOG_FILE="${REPO_ROOT}/var/dashboard.log"
+echo "Starting os8-launcher dashboard on ${URL} ..."
+# nohup + setsid so it survives this terminal closing; stdin from /dev/null
+# so nothing can ever try to read from our TTY.
+setsid nohup "${REPO_ROOT}/launcher" server --port "${PORT}" \
+  </dev/null >>"${LOG_FILE}" 2>&1 &
+dash_pid=$!
+
+# 4. Poll /api/health until ready (or the process dies).
+for _ in $(seq 1 60); do
+  if ! kill -0 "$dash_pid" 2>/dev/null; then
+    echo "Dashboard process exited before becoming ready. Last log lines:"
+    tail -n 20 "${LOG_FILE}" || true
+    exit 1
+  fi
+  if curl -fsS --max-time 1 "${URL}/api/health" >/dev/null 2>&1; then
+    echo "Ready."
+    echo "  ${URL}"
+    echo "  PID:  ${dash_pid}"
+    echo "  Logs: ${LOG_FILE}"
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "Dashboard did not become ready within 30s. Last log lines:"
+tail -n 20 "${LOG_FILE}" || true
+exit 1

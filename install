@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# os8-launcher installer: symlinks `os8-launcher` into ~/.local/bin so the
+# user can run it from anywhere. Idempotent — safe to re-run.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+TARGET_DIR="${HOME}/.local/bin"
+LINK="${TARGET_DIR}/os8-launcher"
+SOURCE="${REPO_ROOT}/start"
+
+if [[ ! -x "$SOURCE" ]]; then
+  echo "Error: ${SOURCE} is missing or not executable." >&2
+  exit 1
+fi
+
+mkdir -p "$TARGET_DIR"
+
+# If something already exists at the link path, only replace it if it's our
+# own symlink (or a stale one). Refuse to clobber a real file the user owns.
+if [[ -e "$LINK" || -L "$LINK" ]]; then
+  if [[ -L "$LINK" ]]; then
+    current="$(readlink "$LINK")"
+    if [[ "$current" == "$SOURCE" ]]; then
+      echo "Already installed: ${LINK} -> ${SOURCE}"
+    else
+      echo "Replacing existing symlink: ${LINK}"
+      echo "  was: ${current}"
+      echo "  now: ${SOURCE}"
+      ln -sfn "$SOURCE" "$LINK"
+    fi
+  else
+    echo "Error: ${LINK} exists and is not a symlink. Refusing to overwrite." >&2
+    echo "Move or remove it manually, then re-run ./install." >&2
+    exit 1
+  fi
+else
+  ln -s "$SOURCE" "$LINK"
+  echo "Installed: ${LINK} -> ${SOURCE}"
+fi
+
+# Check whether ~/.local/bin is on PATH for the *current* shell. We don't edit
+# the user's rc files automatically — just tell them what to do if it's not.
+case ":${PATH}:" in
+  *":${TARGET_DIR}:"*)
+    echo
+    echo "Ready. Run:  os8-launcher"
+    ;;
+  *)
+    echo
+    echo "Note: ${TARGET_DIR} is not on your PATH in this shell."
+    echo "On Ubuntu it's usually picked up at next login (via ~/.profile)."
+    echo "To use it immediately, add this to your ~/.bashrc (or ~/.zshrc):"
+    echo
+    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo
+    echo "Then open a new terminal (or 'source ~/.bashrc') and run:  os8-launcher"
+    ;;
+esac

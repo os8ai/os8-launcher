@@ -469,7 +469,8 @@ def _start_backend_inner(
     )
     record_success(model_name, backend_name, runtime=runtime_id)
     print(f"\nBackend ready: {model_name} via {backend_name}")
-    print(f"  URL: http://localhost:{backend.port}/v1")
+    print(f"  URL:      http://localhost:{backend.port}")
+    print(f"  API base: http://localhost:{backend.port}/v1")
 
 
 def stop_backend():
@@ -614,6 +615,7 @@ def get_status_data() -> dict:
             "port": entry.get("port"),
             "uptime": _format_uptime(entry.get("start_time", "")),
             "start_time": entry.get("start_time"),
+            "ready": entry.get("ready", True),  # legacy entries assumed ready
         }
 
     return result
@@ -634,7 +636,8 @@ def get_status() -> str:
         health = _check_health(backend["port"])
         uptime = _format_uptime(backend.get("start_time", ""))
         lines.append(f"Backend: {backend['name']} serving {backend['model']}")
-        lines.append(f"  URL:    http://localhost:{backend['port']}/v1")
+        lines.append(f"  URL:    http://localhost:{backend['port']}")
+        lines.append(f"  API:    http://localhost:{backend['port']}/v1")
         lines.append(f"  Health: {health}")
         lines.append(f"  Uptime: {uptime}")
 

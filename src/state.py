@@ -65,6 +65,7 @@ def set_client(
     port: int,
     install_type: str,
     container_id: str | None = None,
+    ready: bool = False,
 ):
     """Record a running detached client in state."""
     data = load_state()
@@ -75,8 +76,18 @@ def set_client(
         "container_id": container_id,
         "install_type": install_type,
         "start_time": datetime.now().isoformat(),
+        "ready": ready,
     }
     save_state(data)
+
+
+def mark_client_ready(name: str):
+    """Flip an existing client's ready flag to True."""
+    data = load_state()
+    clients = data.get("clients", {})
+    if name in clients:
+        clients[name]["ready"] = True
+        save_state(data)
 
 
 def clear_client(name: str):
