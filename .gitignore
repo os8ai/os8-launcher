@@ -8,6 +8,7 @@ clients/*/venv/
 # Downloaded binaries and shared libs
 serving/*/bin/
 serving/*/lib/
+clients/*/bin/
 
 # Python
 __pycache__/

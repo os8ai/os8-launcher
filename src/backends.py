@@ -61,7 +61,14 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
         "port": str(backend.port),
         "model_path": str(repo_root / model.path),
         "model_name": model.name,
+        "repo_root": str(repo_root),
     }
+
+    # Pre-create persistent backend cache dir so docker doesn't create it
+    # root-owned. Used by manifests that mount {repo_root}/var/cache/<backend>
+    # to keep torch.compile / kernel caches across container restarts.
+    cache_dir = repo_root / "var" / "cache" / backend.name
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     # NIM-specific
     if model.nim_image:
@@ -140,6 +147,35 @@ def _ensure_image_present(image: str, ngc_key: str | None = None):
     print(f"Image pulled successfully.")
 
 
+def container_log_path(backend_name: str, repo_root: Path) -> Path:
+    """Return the on-disk path where this backend's container logs are streamed."""
+    return repo_root / "var" / "backends" / f"{backend_name}.log"
+
+
+def _start_container_log_streamer(
+    container_name: str,
+    log_path: Path,
+) -> subprocess.Popen | None:
+    """Spawn `docker logs -f` in the background, redirecting all output to
+    log_path. Returns the Popen handle (caller doesn't need to manage it —
+    `docker logs -f` exits naturally when the container stops).
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Truncate at start so the file reflects the current run, not history.
+    fh = open(log_path, "wb")
+    try:
+        return subprocess.Popen(
+            ["docker", "logs", "-f", container_name],
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        fh.close()
+        return None
+
+
 def _start_container(cmd_string: str, backend_name: str) -> str:
     """Start a Docker container in detached mode. Returns container ID."""
     cmd = parse_command(cmd_string)
@@ -202,6 +238,7 @@ def _wait_for_healthy(
     interval: int = 3,
     initial_delay: int = 5,
     container_name: str | None = None,
+    log_path: Path | None = None,
 ):
     """Poll the backend's health endpoint until it responds.
 
@@ -239,29 +276,50 @@ def _wait_for_healthy(
                 return
         except (urllib.error.URLError, ConnectionError, OSError):
             # Periodically tail container logs so the user sees real progress.
+            # Prefer the on-disk streamed log (full fidelity, no extra docker
+            # calls); fall back to `docker logs --tail` for backends that
+            # don't have a streamer.
             now = time.time()
-            if container_name and now - last_log_dump >= log_interval:
+            if (log_path or container_name) and now - last_log_dump >= log_interval:
                 last_log_dump = now
                 elapsed = int(now - start)
-                try:
-                    logs = subprocess.run(
-                        ["docker", "logs", "--tail", "5", container_name],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    tail = (logs.stdout + logs.stderr).strip().splitlines()
-                    if tail:
-                        print(f"  [+{elapsed}s] container log tail:")
-                        for line in tail[-5:]:
-                            print(f"    | {line}")
-                except (subprocess.TimeoutExpired, FileNotFoundError):
-                    pass
+                tail: list[str] = []
+                if log_path and log_path.exists():
+                    try:
+                        with open(log_path, "rb") as fh:
+                            try:
+                                fh.seek(-4096, 2)
+                            except OSError:
+                                fh.seek(0)
+                            data = fh.read().decode("utf-8", errors="replace")
+                        tail = data.strip().splitlines()
+                    except OSError:
+                        pass
+                elif container_name:
+                    try:
+                        logs = subprocess.run(
+                            ["docker", "logs", "--tail", "5", container_name],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        tail = (logs.stdout + logs.stderr).strip().splitlines()
+                    except (subprocess.TimeoutExpired, FileNotFoundError):
+                        pass
+                if tail:
+                    print(f"  [+{elapsed}s] container log tail:")
+                    for line in tail[-5:]:
+                        print(f"    | {line}")
             time.sleep(interval)
 
     print("  Health check timed out.")
+    log_hint = (
+        f"  tail -f {log_path}   (streamed container log)\n"
+        if log_path
+        else "  docker logs os8-<backend>   (for containers)\n"
+    )
     raise BackendError(
         f"Health check timed out after {timeout}s.\n"
         f"The model may still be loading. Check logs:\n"
-        f"  docker logs os8-<backend>   (for containers)\n"
+        f"{log_hint}"
         f"  or check process output     (for pip/binary backends)"
     )
 
@@ -374,6 +432,12 @@ def _start_backend_inner(
             _ensure_image_present(image_to_check, ngc_key=ngc_key_for_pull)
         container_id = _start_container(cmd_string, backend_name)
         print(f"  Container started: {container_id[:12]}")
+        # Stream the container's full logs to disk so the user (and the
+        # dashboard) can tail real progress instead of relying on the
+        # 5-line snapshots emitted during the health-check loop.
+        log_path = container_log_path(backend_name, repo_root)
+        _start_container_log_streamer(f"os8-{backend_name}", log_path)
+        print(f"  Streaming logs to: {log_path.relative_to(repo_root)}")
         check_alive = lambda: is_container_running(container_id)
 
     elif manifest.install_type == "pip":
@@ -444,12 +508,16 @@ def _start_backend_inner(
     # much faster. Generous timeout protects the cold-start case.
     health_timeout = 7200 if backend_name == "nim" else 900
     container_name_for_logs = f"os8-{backend_name}" if container_id else None
+    log_path_for_wait = (
+        container_log_path(backend_name, repo_root) if container_id else None
+    )
     try:
         _wait_for_healthy(
             backend.port,
             check_alive,
             timeout=health_timeout,
             container_name=container_name_for_logs,
+            log_path=log_path_for_wait,
         )
     except BackendError as e:
         print("\n  Cleaning up...")
