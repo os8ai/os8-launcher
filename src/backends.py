@@ -14,7 +14,28 @@ from src.actionlog import (
     log_group_start, log_group_done,
 )
 from src.config import Config, ConfigError
-from src.credentials import get_ngc_key, prompt_ngc_key
+from src.credentials import (
+    get_ngc_key, prompt_ngc_key,
+    get_hf_token, prompt_hf_token,
+)
+
+
+def _lookup_credential(name: str) -> str | None:
+    """Resolve a credential by manifest name. Returns None if unset."""
+    if name == "ngc_api_key":
+        return get_ngc_key()
+    if name == "hf_token":
+        return get_hf_token()
+    return None
+
+
+def _prompt_credential(name: str) -> str | None:
+    """Interactively prompt for a credential by manifest name."""
+    if name == "ngc_api_key":
+        return prompt_ngc_key()
+    if name == "hf_token":
+        return prompt_hf_token()
+    return None
 from src.preflight import (
     check_docker,
     check_nvidia_container_toolkit,
@@ -37,15 +58,76 @@ class BackendError(Exception):
     """Raised when a backend operation fails."""
 
 
-def served_model_name(model, backend_name: str) -> str:
+def served_model_name(model, backend) -> str:
     """Return the name the backend exposes to API clients.
 
-    vLLM uses the launcher's model.name (via --served-model-name).
-    Ollama uses the ollama_tag (e.g. "qwen3-coder:30b").
+    Honors `model_name_template` from the manifest if set (e.g. ollama uses
+    "{ollama_tag}"). Falls back to model.name.
     """
-    if backend_name == "ollama":
-        return model.ollama_tag or model.name
+    template = None
+    if backend and backend.manifest:
+        template = backend.manifest.fields.get("model_name_template")
+    if template:
+        # Expand against the model's __dict__ so manifests can reference any
+        # ModelConfig field by name.
+        try:
+            value = template.format(**_model_template_vars(model))
+            if value:
+                return value
+        except KeyError:
+            pass
     return model.name
+
+
+def _model_template_vars(model) -> dict:
+    """Expose model fields to manifest templates as a flat dict."""
+    return {
+        "name": model.name,
+        "source": model.source,
+        "path": model.path,
+        "format": model.format,
+        "nim_image": model.nim_image or "",
+        "ollama_tag": model.ollama_tag or "",
+        # Generic alias used by post_start templates so manifests don't need
+        # to know which specific tag field a backend uses.
+        "model_tag": model.ollama_tag or model.name,
+    }
+
+
+def _run_post_start(manifest, variables: dict, repo_root: Path):
+    """Run an optional post_start hook declared in a manifest.
+
+    Shape:
+        post_start:
+          wait_for: <url>           (optional — poll until 200)
+          wait_timeout: <seconds>   (default 30)
+          run: <command template>   (expanded against `variables`)
+    """
+    post = manifest.fields.get("post_start") if manifest else None
+    if not post:
+        return
+
+    wait_for = post.get("wait_for")
+    if wait_for:
+        wait_url = expand_template(wait_for, variables)
+        wait_timeout = int(post.get("wait_timeout") or 30)
+        print(f"  Waiting for {wait_url} ...")
+        for _ in range(wait_timeout):
+            try:
+                with urllib.request.urlopen(wait_url, timeout=2):
+                    break
+            except (urllib.error.URLError, ConnectionError, OSError):
+                time.sleep(1)
+        else:
+            raise BackendError(f"post_start wait_for timed out: {wait_url}")
+
+    run_template = post.get("run")
+    if run_template:
+        cmd_string = expand_template(run_template, variables)
+        print(f"  post_start: {cmd_string}")
+        result = subprocess.run(parse_command(cmd_string))
+        if result.returncode != 0:
+            raise BackendError(f"post_start command failed: {cmd_string}")
 
 
 def _check_model_downloaded(model_path: Path) -> bool:
@@ -70,12 +152,17 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
     cache_dir = repo_root / "var" / "cache" / backend.name
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # NIM-specific
-    if model.nim_image:
-        variables["nim_image"] = model.nim_image
-    ngc_key = get_ngc_key()
-    if ngc_key:
-        variables["ngc_api_key"] = ngc_key
+    # Expose model fields generically so manifests can reference any of them.
+    variables.update(_model_template_vars(model))
+
+    # Inject credentials declared in the manifest. Each name maps to a
+    # function in src.credentials. Missing credentials are simply omitted —
+    # if the run template references one and it isn't set, expand_template
+    # will raise a clear error at start time.
+    for cred_name in (backend.manifest.fields.get("credentials") or []) if backend.manifest else []:
+        value = _lookup_credential(cred_name)
+        if value:
+            variables[cred_name] = value
 
     # Container image from manifest
     if backend.manifest and "image" in backend.manifest.fields:
@@ -196,36 +283,65 @@ def _start_container(cmd_string: str, backend_name: str) -> str:
     return container_id
 
 
-def _start_pip_process(cmd_string: str, venv_path: Path, extra_env: dict | None = None) -> subprocess.Popen:
-    """Start a pip-based backend as a background subprocess."""
+def _open_backend_log(log_path: Path):
+    """Open a backend log file for writing, creating parents and truncating."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    return open(log_path, "wb")
+
+
+def _start_pip_process(
+    cmd_string: str,
+    venv_path: Path,
+    extra_env: dict | None = None,
+    log_path: Path | None = None,
+) -> subprocess.Popen:
+    """Start a pip-based backend as a background subprocess.
+
+    Output is redirected to `log_path` (or DEVNULL) rather than to PIPEs —
+    PIPEs whose parent has exited can SIGPIPE the child once full, killing
+    daemons after `./launcher serve` returns.
+    """
     cmd = parse_command(cmd_string)
     env = build_env_for_venv(venv_path)
     if extra_env:
         env.update(extra_env)
 
+    out = _open_backend_log(log_path) if log_path else subprocess.DEVNULL
     process = subprocess.Popen(
         cmd,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=out,
+        stderr=subprocess.STDOUT if log_path else subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
     return process
 
 
-def _start_binary_process(cmd_string: str, extra_env: dict | None = None) -> subprocess.Popen:
-    """Start a binary backend as a background subprocess."""
+def _start_binary_process(
+    cmd_string: str,
+    extra_env: dict | None = None,
+    log_path: Path | None = None,
+) -> subprocess.Popen:
+    """Start a binary backend as a background subprocess.
+
+    Output is redirected to `log_path` (or DEVNULL) rather than to PIPEs —
+    PIPEs whose parent has exited can SIGPIPE the child once full, killing
+    daemons after `./launcher serve` returns.
+    """
     cmd = parse_command(cmd_string)
 
     env = None
     if extra_env:
         env = {**os.environ, **extra_env}
 
+    out = _open_backend_log(log_path) if log_path else subprocess.DEVNULL
     process = subprocess.Popen(
         cmd,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=out,
+        stderr=subprocess.STDOUT if log_path else subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
     return process
@@ -239,6 +355,7 @@ def _wait_for_healthy(
     initial_delay: int = 5,
     container_name: str | None = None,
     log_path: Path | None = None,
+    health_path: str = "/v1/models",
 ):
     """Poll the backend's health endpoint until it responds.
 
@@ -252,7 +369,7 @@ def _wait_for_healthy(
             launcher's stdout so the dashboard log panel shows real backend
             progress instead of just polling dots.
     """
-    url = f"http://localhost:{port}/v1/models"
+    url = f"http://localhost:{port}{health_path}"
 
     print(f"  Waiting for backend to be ready on port {port}...", flush=True)
     time.sleep(initial_delay)
@@ -370,10 +487,16 @@ def _start_backend_inner(
     if not manifest:
         raise BackendError(f"Backend '{backend_name}' has no manifest.")
 
-    # 3. Check model is downloaded (for NIM, cache dir just needs to exist;
-    #    for ollama, the store is managed by ollama itself and we pull below)
+    # 3. Check model is downloaded. Backends that manage their own model store
+    #    (download.type: daemon-pull) or that download on first run from a
+    #    container (install_type: container) skip the on-disk check.
     model_path = repo_root / model.path
-    if manifest.install_type != "container" and backend_name != "ollama":
+    download_type = (manifest.fields.get("download") or {}).get("type")
+    skip_disk_check = (
+        manifest.install_type == "container"
+        or download_type == "daemon-pull"
+    )
+    if not skip_disk_check:
         if not _check_model_downloaded(model_path):
             raise BackendError(
                 f"Model '{model_name}' is not downloaded.\n"
@@ -403,14 +526,20 @@ def _start_backend_inner(
 
     variables = _build_variables(model, backend, config, repo_root)
 
-    # NIM needs NGC auth
-    if manifest.install_type == "container" and "nvcr.io" in (model.nim_image or ""):
-        ngc_key = get_ngc_key()
-        if not ngc_key:
-            ngc_key = prompt_ngc_key()
-        if not ngc_key:
-            raise BackendError("NGC API key is required to run NIM.")
-        variables["ngc_api_key"] = ngc_key
+    # If the run template references a declared credential that wasn't
+    # picked up by _build_variables (because it isn't set yet), prompt for it.
+    declared_creds = (manifest.fields.get("credentials") or [])
+    for cred_name in declared_creds:
+        if cred_name in variables:
+            continue
+        if "{" + cred_name + "}" not in run_template:
+            continue
+        value = _prompt_credential(cred_name)
+        if not value:
+            raise BackendError(
+                f"Credential '{cred_name}' is required by backend '{backend_name}'."
+            )
+        variables[cred_name] = value
 
     cmd_string = expand_template(run_template, variables)
 
@@ -420,13 +549,18 @@ def _start_backend_inner(
     pid = None
 
     if manifest.install_type == "container":
-        # Create cache dir for NIM
+        # Ensure the cache dir exists so the container can mount it.
         model_path.mkdir(parents=True, exist_ok=True)
         # Ensure the image is cached locally before starting; pulls if missing.
-        image_to_check = (
-            model.nim_image
-            or (manifest.fields.get("image") if manifest.fields else None)
-        )
+        # Per-model image fields (declared via manifest's download.image_field)
+        # take precedence over the manifest's static `image` field.
+        download_cfg = manifest.fields.get("download") or {}
+        image_field = download_cfg.get("image_field")
+        image_to_check = None
+        if image_field:
+            image_to_check = getattr(model, image_field, None)
+        if not image_to_check:
+            image_to_check = manifest.fields.get("image") if manifest.fields else None
         if image_to_check:
             ngc_key_for_pull = get_ngc_key() if "nvcr.io" in image_to_check else None
             _ensure_image_present(image_to_check, ngc_key=ngc_key_for_pull)
@@ -451,8 +585,10 @@ def _start_backend_inner(
                 f"Run: ./launcher setup {backend_name}"
             )
         extra_env = manifest.fields.get("env") if manifest.fields.get("env") else None
-        process = _start_pip_process(cmd_string, venv_path, extra_env)
+        log_path = container_log_path(backend_name, repo_root)
+        process = _start_pip_process(cmd_string, venv_path, extra_env, log_path=log_path)
         pid = process.pid
+        print(f"  Streaming logs to: {log_path.relative_to(repo_root)}")
         print(f"  Process started: PID {pid}")
         check_alive = lambda: is_process_alive(pid)
 
@@ -464,33 +600,17 @@ def _start_backend_inner(
                 f"Run: ./launcher setup {backend_name}"
             )
         binary_env = manifest.fields.get("env") or {}
-        process = _start_binary_process(cmd_string, extra_env=binary_env)
-        # Ollama pull requires the daemon to be running. Start it first,
-        # wait briefly for the API to come up, then pull the tag.
-        if backend_name == "ollama":
-            tag = model.ollama_tag or model.name
-            binary_abs = str(repo_root / binary_rel) if binary_rel else "ollama"
-            print(f"  Waiting for ollama daemon...")
-            for _ in range(30):
-                try:
-                    with urllib.request.urlopen(
-                        f"http://localhost:{backend.port}/api/version", timeout=2
-                    ):
-                        break
-                except (urllib.error.URLError, ConnectionError, OSError):
-                    time.sleep(1)
-            else:
-                raise BackendError("ollama daemon did not start in time.")
-            print(f"  Pulling ollama model: {tag}")
-            pull = subprocess.run([binary_abs, "pull", tag])
-            if pull.returncode != 0:
-                raise BackendError(f"Failed to pull ollama model: {tag}")
+        log_path = container_log_path(backend_name, repo_root)
+        process = _start_binary_process(cmd_string, extra_env=binary_env, log_path=log_path)
         pid = process.pid
+        print(f"  Streaming logs to: {log_path.relative_to(repo_root)}")
         print(f"  Process started: PID {pid}")
         check_alive = lambda: is_process_alive(pid)
 
     else:
         raise BackendError(f"Unknown install_type: {manifest.install_type}")
+
+    health_path = manifest.fields.get("health_path") or "/v1/models"
 
     # 8. Record state
     set_backend(
@@ -500,17 +620,23 @@ def _start_backend_inner(
         install_type=manifest.install_type,
         pid=pid,
         container_id=container_id,
+        health_path=health_path,
     )
 
-    # 9. Health check
-    # NIM containers can take 30-60+ minutes on first boot to download
-    # TensorRT-LLM engine files from NGC. After first boot the cache makes it
-    # much faster. Generous timeout protects the cold-start case.
-    health_timeout = 7200 if backend_name == "nim" else 900
+    # 9. Post-start hook (optional) — runs before the health check.
+    # Used by backends like ollama that need to pull a tag once their
+    # daemon is up but before they're considered "ready to serve".
+    _run_post_start(manifest, variables, repo_root)
+
+    # 10. Health check
+    # Manifests can override the default timeout (e.g. NIM cold-start can take
+    # 30-60+ minutes while TensorRT-LLM engine files download from NGC).
+    health_timeout = int(manifest.fields.get("health_timeout") or 900)
     container_name_for_logs = f"os8-{backend_name}" if container_id else None
-    log_path_for_wait = (
-        container_log_path(backend_name, repo_root) if container_id else None
-    )
+    # Every backend now writes its logs to disk (containers via streamer,
+    # binary/pip via direct redirection), so the wait loop can tail real
+    # progress regardless of install type.
+    log_path_for_wait = container_log_path(backend_name, repo_root)
     try:
         _wait_for_healthy(
             backend.port,
@@ -518,6 +644,7 @@ def _start_backend_inner(
             timeout=health_timeout,
             container_name=container_name_for_logs,
             log_path=log_path_for_wait,
+            health_path=health_path,
         )
     except BackendError as e:
         print("\n  Cleaning up...")
@@ -647,10 +774,10 @@ def _format_uptime(start_time_str: str) -> str:
         return "unknown"
 
 
-def _check_health(port: int) -> str:
+def _check_health(port: int, health_path: str = "/v1/models") -> str:
     """Quick one-shot health check. Returns 'healthy' or 'unhealthy'."""
     try:
-        url = f"http://localhost:{port}/v1/models"
+        url = f"http://localhost:{port}{health_path}"
         with urllib.request.urlopen(url, timeout=3):
             return "healthy"
     except Exception:
@@ -666,7 +793,7 @@ def get_status_data() -> dict:
     result = {"backend": None, "clients": {}}
 
     if backend:
-        health = _check_health(backend["port"])
+        health = _check_health(backend["port"], backend.get("health_path") or "/v1/models")
         uptime = _format_uptime(backend.get("start_time", ""))
         result["backend"] = {
             "name": backend["name"],
@@ -690,10 +817,15 @@ def get_status_data() -> dict:
 
 
 def get_status() -> str:
-    """Get a formatted status string for all running services."""
-    state = validate_state()
-    backend = state.get("backend")
-    clients = state.get("clients", {})
+    """Get a formatted status string for all running services.
+
+    Thin formatter over get_status_data() — that function is the single
+    source of truth for what's running. Output format is preserved
+    byte-for-byte for any scripts parsing it.
+    """
+    data = get_status_data()
+    backend = data["backend"]
+    clients = data["clients"]
 
     if not backend and not clients:
         return "Nothing running."
@@ -701,20 +833,17 @@ def get_status() -> str:
     lines = []
 
     if backend:
-        health = _check_health(backend["port"])
-        uptime = _format_uptime(backend.get("start_time", ""))
         lines.append(f"Backend: {backend['name']} serving {backend['model']}")
         lines.append(f"  URL:    http://localhost:{backend['port']}")
         lines.append(f"  API:    http://localhost:{backend['port']}/v1")
-        lines.append(f"  Health: {health}")
-        lines.append(f"  Uptime: {uptime}")
+        lines.append(f"  Health: {backend['health']}")
+        lines.append(f"  Uptime: {backend['uptime']}")
 
     if clients:
         lines.append("")
         lines.append("Clients:")
         for name, entry in clients.items():
-            uptime = _format_uptime(entry.get("start_time", ""))
             port_str = f"http://localhost:{entry['port']}" if entry.get("port") else ""
-            lines.append(f"  {name:<15} {port_str:<30} running  {uptime}")
+            lines.append(f"  {name:<15} {port_str:<30} running  {entry['uptime']}")
 
     return "\n".join(lines)

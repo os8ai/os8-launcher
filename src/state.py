@@ -38,6 +38,7 @@ def set_backend(
     install_type: str,
     pid: int | None = None,
     container_id: str | None = None,
+    health_path: str = "/v1/models",
 ):
     """Record a running backend in state."""
     data = load_state()
@@ -48,6 +49,7 @@ def set_backend(
         "pid": pid,
         "container_id": container_id,
         "install_type": install_type,
+        "health_path": health_path,
         "start_time": datetime.now().isoformat(),
     }
     save_state(data)

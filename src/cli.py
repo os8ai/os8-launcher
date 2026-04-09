@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve", help="Start a serving backend")
     serve_parser.add_argument("model", help="Model to serve")
     serve_parser.add_argument("--backend", help="Backend to use (default: model's default)")
+    serve_parser.add_argument("--client", help="Also launch this client once the backend is ready")
     serve_parser.set_defaults(handler="serve")
 
     # --- client ---
@@ -132,7 +133,7 @@ def main(repo_root: Path):
         from src.projects import (
             ProjectError, list_projects, create_project,
             set_active_project, clear_active_project, get_active_project,
-            projects_dir,
+            projects_dir, project_payload,
         )
         try:
             if handler == "project_list":
@@ -145,18 +146,21 @@ def main(repo_root: Path):
                     return
                 print(f"Projects (in {projects_dir()}):")
                 for p in projects:
-                    marker = "* " if p.name == active_name else "  "
-                    print(f"{marker}{p.name}")
+                    payload = project_payload(p)
+                    marker = "* " if payload["name"] == active_name else "  "
+                    print(f"{marker}{payload['name']}")
                 return
             if handler == "project_new":
                 p = create_project(args.name, description=args.description)
                 set_active_project(p.name)
-                print(f"Created and activated project: {p.name}")
-                print(f"  Path: {p.path}")
+                payload = project_payload(p)
+                print(f"Created and activated project: {payload['name']}")
+                print(f"  Path: {payload['path']}")
                 return
             if handler == "project_use":
                 p = set_active_project(args.name)
-                print(f"Active project: {p.name} ({p.path})")
+                payload = project_payload(p)
+                print(f"Active project: {payload['name']} ({payload['path']})")
                 return
             if handler == "project_clear":
                 clear_active_project()
@@ -167,10 +171,11 @@ def main(repo_root: Path):
                 if not p:
                     print("No active project. Set one with: ./launcher project use <name>")
                     return
-                print(f"Active project: {p.name}")
-                print(f"  Path: {p.path}")
-                if p.description:
-                    print(f"  Description: {p.description}")
+                payload = project_payload(p)
+                print(f"Active project: {payload['name']}")
+                print(f"  Path: {payload['path']}")
+                if payload["description"]:
+                    print(f"  Description: {payload['description']}")
                 return
         except ProjectError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -259,11 +264,26 @@ def main(repo_root: Path):
 
     # --- serve ---
     if handler == "serve":
-        from src.backends import start_backend, BackendError
+        from src.backends import BackendError
+        from src.clients import ClientError
+        from src.runtime import serve_combo
         try:
             config = load_config(repo_root)
-            start_backend(args.model, getattr(args, "backend", None), config, repo_root)
-        except (ConfigError, BackendError, KeyboardInterrupt) as e:
+            # Validate model/backend/client up front so we fail fast with a
+            # clear error before starting any process.
+            config.get_model(args.model)
+            if getattr(args, "backend", None):
+                config.get_backend(args.backend)
+            if getattr(args, "client", None):
+                config.get_client(args.client)
+            serve_combo(
+                args.model,
+                getattr(args, "backend", None),
+                getattr(args, "client", None),
+                config,
+                repo_root,
+            )
+        except (ConfigError, BackendError, ClientError, KeyboardInterrupt) as e:
             if isinstance(e, KeyboardInterrupt):
                 print("\nAborted.")
             else:
@@ -307,15 +327,11 @@ def main(repo_root: Path):
     if handler == "server":
         import uvicorn
         from src.api import app
-        # Crash-recovery safety net: clean up any state left over from a
-        # previous launcher run that didn't shut down cleanly. Normal
-        # shutdowns/restarts already tear things down before exit, so this
-        # is usually a no-op.
-        from src.backends import stop_all
-        try:
-            stop_all()
-        except Exception as e:
-            print(f"  (cleanup warning: {e})")
+        # Clean shutdown is guaranteed by the FastAPI shutdown event handler
+        # in api.py, which uvicorn fires on SIGTERM/SIGINT/restart. The
+        # previous unconditional stop_all() at startup has been removed —
+        # state.validate_state() handles ungraceful exits (kill -9, OOM)
+        # by reaping anything dead the next time state is read.
         print(f"Starting os8-launcher dashboard on http://localhost:{args.port}")
         app.state.restart_requested = False
         config = uvicorn.Config(app, host="0.0.0.0", port=args.port, log_level="warning")

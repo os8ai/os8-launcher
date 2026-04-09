@@ -18,6 +18,7 @@ from src.backends import (
     get_status_data, BackendError,
 )
 from src.clients import start_client, stop_client, ClientError
+from src.runtime import serve_combo
 from src.credentials import get_ngc_key, set_ngc_key, get_hf_token, set_hf_token
 from src.installer import (
     setup_tool, get_all_tools_status, InstallError,
@@ -29,6 +30,7 @@ from src.projects import (
     list_projects, create_project, get_active_project,
     set_active_project, clear_active_project, projects_dir,
     rename_project, ensure_active_project, update_last_selection,
+    project_payload as _project_payload,
     ProjectError,
 )
 
@@ -85,6 +87,20 @@ def startup():
     # the post-restart process apart from the pre-restart one (the gap
     # between socket close and rebind is too small to detect by polling).
     app.state.server_id = f"{os.getpid()}-{int(time.time() * 1000)}"
+
+
+@app.on_event("shutdown")
+def shutdown():
+    # uvicorn fires this on graceful shutdown — including SIGTERM/SIGINT.
+    # Without it, an external `kill <dashboard pid>` would orphan any
+    # running backend container/process and leave a stale state file
+    # pointing at it. The /api/server/stop and /api/server/restart paths
+    # already call stop_all() before triggering shutdown, so this is a
+    # no-op for those (stop_all is safe to call when nothing's running).
+    try:
+        stop_all()
+    except Exception as e:
+        print(f"  (shutdown cleanup warning: {e})")
 
 
 def _config():
@@ -153,18 +169,6 @@ def api_credentials_set(req: CredentialsRequest):
 
 
 # --- Projects endpoints ---
-
-def _project_payload(p):
-    return {
-        "name": p.name,
-        "path": str(p.path),
-        "description": p.description,
-        "created_at": p.created_at,
-        "last_model": p.default_model,
-        "last_backend": p.default_backend,
-        "last_client": p.default_client,
-    }
-
 
 @app.get("/api/projects")
 def api_projects_list():
@@ -243,17 +247,6 @@ def api_logs():
 
 # --- Mutation endpoints ---
 
-def _serve_sequential(model: str, backend: str | None, client: str | None):
-    """Start the backend, then (only if it came up healthy) start the client.
-
-    Run inside _run_with_log_capture so all output lands in the dashboard log
-    in strict order: backend lines first, then client lines.
-    """
-    start_backend(model, backend, _config(), _repo_root())
-    if client:
-        start_client(client, _config(), _repo_root(), model, backend)
-
-
 @app.post("/api/serve")
 def api_serve(req: ServeRequest, background_tasks: BackgroundTasks):
     try:
@@ -278,7 +271,7 @@ def api_serve(req: ServeRequest, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(
         _run_with_log_capture,
-        _serve_sequential, req.model, req.backend, req.client,
+        serve_combo, req.model, req.backend, req.client, _config(), _repo_root(),
     )
     return {"status": "starting"}
 

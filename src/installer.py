@@ -125,27 +125,32 @@ def _update_pip(manifest: ManifestConfig, repo_root: Path):
 # --- container install type ---
 
 def _install_container(manifest: ManifestConfig, config: Config):
-    """Pull a Docker container image."""
+    """Pull a Docker container image.
+
+    For backends whose manifest declares `download.type: image-pull`, the
+    actual image is per-model and we pull every image referenced by any
+    model that lists this backend. Otherwise we pull the static `image:`
+    field from the manifest itself.
+    """
     checks = [
         ("Docker", check_docker()),
     ]
 
     image = manifest.fields.get("image", "")
+    download_cfg = manifest.fields.get("download") or {}
+    is_per_model_image = download_cfg.get("type") == "image-pull"
 
     # NGC images need auth and nvidia runtime
-    if "nvcr.io" in image:
+    if "nvcr.io" in image or is_per_model_image:
         checks.append(("NVIDIA Container Toolkit", check_nvidia_container_toolkit()))
 
     if not run_checks(checks):
         raise InstallError("Prerequisites not met.")
 
-    # For NIM, the actual image comes from the model config, not the manifest.
-    # The manifest image field is a template. We pull all model-specific NIM images.
-    if manifest.name == "nim":
-        _install_nim_images(config)
+    if is_per_model_image:
+        _install_per_model_images(manifest, config)
         return
 
-    # For non-NIM containers (e.g., Open WebUI)
     if not image or image.startswith("{"):
         raise InstallError(
             f"Manifest for '{manifest.name}' has no valid image to pull."
@@ -158,44 +163,64 @@ def _install_container(manifest: ManifestConfig, config: Config):
     print(f"  {manifest.name} installed successfully.")
 
 
-def _install_nim_images(config: Config):
-    """Pull NIM container images for all models that support NIM."""
-    # Ensure NGC auth
-    ngc_key = get_ngc_key()
-    if not ngc_key:
-        ngc_key = prompt_ngc_key()
-    if not ngc_key:
-        raise InstallError("NGC API key is required to pull NIM images.")
+def _install_per_model_images(manifest: ManifestConfig, config: Config):
+    """Pull a per-model image for every model that lists this backend.
 
-    # Docker login to nvcr.io
-    print("  Logging in to nvcr.io...")
-    result = subprocess.run(
-        ["docker", "login", "nvcr.io",
-         "--username", "$oauthtoken",
-         "--password-stdin"],
-        input=ngc_key,
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
+    Driven by the manifest's `download` block:
+        download:
+          type: image-pull
+          image_field: nim_image
+    """
+    download_cfg = manifest.fields.get("download") or {}
+    image_field = download_cfg.get("image_field")
+    if not image_field:
         raise InstallError(
-            "Failed to log in to nvcr.io. Check your NGC API key.\n"
-            f"  {result.stderr.strip()}"
+            f"Manifest for '{manifest.name}' has download.type=image-pull "
+            f"but no image_field."
         )
 
-    # Pull each model's NIM image
+    backend_name = manifest.name
+    candidates = [
+        (name, getattr(model, image_field, None))
+        for name, model in config.models.items()
+        if backend_name in model.backends
+    ]
+    candidates = [(n, img) for n, img in candidates if img]
+
+    if not candidates:
+        print(f"  No models configured for {backend_name}.")
+        return
+
+    # If any image is from nvcr.io, log in once up front.
+    if any("nvcr.io" in img for _, img in candidates):
+        ngc_key = get_ngc_key()
+        if not ngc_key:
+            ngc_key = prompt_ngc_key()
+        if not ngc_key:
+            raise InstallError("NGC API key is required to pull these images.")
+
+        print("  Logging in to nvcr.io...")
+        result = subprocess.run(
+            ["docker", "login", "nvcr.io",
+             "--username", "$oauthtoken",
+             "--password-stdin"],
+            input=ngc_key,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise InstallError(
+                "Failed to log in to nvcr.io. Check your NGC API key.\n"
+                f"  {result.stderr.strip()}"
+            )
+
     pulled = 0
-    for name, model in config.models.items():
-        if "nim" not in model.backends or not model.nim_image:
-            continue
-        print(f"  Pulling NIM image for {name}: {model.nim_image}...")
-        if not _run_command(["docker", "pull", model.nim_image], "docker pull"):
-            raise InstallError(f"Failed to pull NIM image: {model.nim_image}")
+    for name, image in candidates:
+        print(f"  Pulling image for {name}: {image}...")
+        if not _run_command(["docker", "pull", image], "docker pull"):
+            raise InstallError(f"Failed to pull image: {image}")
         pulled += 1
 
-    if pulled == 0:
-        print("  No models configured for NIM.")
-    else:
-        print(f"  NIM setup complete — pulled {pulled} image(s).")
+    print(f"  {backend_name} setup complete — pulled {pulled} image(s).")
 
 
 def _update_container(manifest: ManifestConfig, config: Config):
@@ -378,16 +403,22 @@ def get_tool_status(name: str, config: Config, repo_root: Path) -> str:
             return "not installed"
         case "container":
             image = manifest.fields.get("image", "")
-            if manifest.name == "nim":
-                # Check if any NIM model image is pulled
+            download_cfg = manifest.fields.get("download") or {}
+            if download_cfg.get("type") == "image-pull":
+                # Per-model images — installed if any model's image is cached.
+                image_field = download_cfg.get("image_field")
                 for model in config.models.values():
-                    if model.nim_image:
-                        result = subprocess.run(
-                            ["docker", "image", "inspect", model.nim_image],
-                            capture_output=True, timeout=10,
-                        )
-                        if result.returncode == 0:
-                            return "installed"
+                    if name not in model.backends:
+                        continue
+                    img = getattr(model, image_field, None) if image_field else None
+                    if not img:
+                        continue
+                    result = subprocess.run(
+                        ["docker", "image", "inspect", img],
+                        capture_output=True, timeout=10,
+                    )
+                    if result.returncode == 0:
+                        return "installed"
                 return "not installed"
             if not image or image.startswith("{"):
                 return "unknown"

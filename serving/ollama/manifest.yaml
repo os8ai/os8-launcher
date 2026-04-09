@@ -4,12 +4,28 @@ install_type: binary
 # lib/ollama/cuda_jetpack6/ provides GB10/Blackwell acceleration.
 source: https://github.com/ollama/ollama/releases
 binary: serving/ollama/bin/ollama
-# Ollama manages its own model store under ~/.ollama; models are pulled
-# manually with `ollama pull <name>` rather than via the launcher's
-# models download flow.
+# Ollama manages its own model store under ~/.ollama.
 # Bind to all interfaces so containers (e.g. open-webui) can reach the daemon
 # via host.docker.internal -> 172.17.0.1 instead of just 127.0.0.1.
 env:
   OLLAMA_HOST: "0.0.0.0:11434"
 run: "{binary} serve"
 update: "download latest release tarball from github.com/ollama/ollama/releases"
+
+# Ollama doesn't expose /v1/models the same way; use its native version endpoint.
+health_path: /api/version
+
+# What the served model name actually is from the API's perspective —
+# ollama uses tags like "qwen3-coder:30b", not the launcher's model name.
+model_name_template: "{ollama_tag}"
+
+# Download strategy: start the daemon, run `ollama pull <tag>`, stop daemon.
+download:
+  type: daemon-pull
+  tag_field: ollama_tag
+
+# After the daemon comes up, pull the model tag for the active model.
+post_start:
+  wait_for: "http://localhost:{port}/api/version"
+  wait_timeout: 30
+  run: "{binary} pull {model_tag}"

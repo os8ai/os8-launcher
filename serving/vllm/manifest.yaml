@@ -4,3 +4,11 @@ image: os8-vllm:gemma4
 port: 8000
 run: "docker run --gpus all --ipc=host -p {port}:8000 -v {model_path}:/model -v {repo_root}/var/cache/vllm:/root/.cache/vllm {backend_env_flags} {image} --model /model --served-model-name {model_name} --trust-remote-code {backend_args}"
 update: "docker pull vllm/vllm-openai:cu130-nightly"
+
+# vLLM can pull gated models from HF on first serve; token is optional.
+credentials:
+  - hf_token
+
+# Model weights come from a HuggingFace snapshot download.
+download:
+  type: hf-snapshot

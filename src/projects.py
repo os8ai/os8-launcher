@@ -33,6 +33,22 @@ class Project:
     description: str | None = None
 
 
+def project_payload(p: "Project") -> dict:
+    """Single source of truth for serializing a Project to a JSON-friendly dict.
+
+    Used by both the API (dashboard) and the CLI so the two views never drift.
+    """
+    return {
+        "name": p.name,
+        "path": str(p.path),
+        "description": p.description,
+        "created_at": p.created_at,
+        "last_model": p.default_model,
+        "last_backend": p.default_backend,
+        "last_client": p.default_client,
+    }
+
+
 def projects_dir() -> Path:
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     return PROJECTS_DIR

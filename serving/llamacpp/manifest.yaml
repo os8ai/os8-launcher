@@ -4,3 +4,10 @@ source: https://github.com/ggerganov/llama.cpp/releases
 binary: serving/llamacpp/bin/llama-server
 run: "{binary} -m {model_path} --port {port}"
 update: "download latest release"
+
+# llama.cpp consumes GGUF files; download from HF (often gated).
+credentials:
+  - hf_token
+
+download:
+  type: hf-snapshot

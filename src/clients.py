@@ -174,11 +174,12 @@ def _start_client_inner(
     # Build variables
     from src.backends import served_model_name
     model_cfg = config.get_model(backend_model)
+    backend_cfg = config.get_backend(backend_name_actual)
     variables = {
         "port": str(backend_port),
         "backend_port": str(backend_port),
         "backend_name": backend_name_actual,
-        "served_model_name": served_model_name(model_cfg, backend_name_actual),
+        "served_model_name": served_model_name(model_cfg, backend_cfg),
     }
     if client.port:
         variables["port"] = str(client.port)
