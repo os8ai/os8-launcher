@@ -58,6 +58,10 @@ os8-launcher status      # Show what's running
 
 Run `os8-launcher --help` for the full command list.
 
+## Customizing with Claude Code
+
+os8-launcher is designed to be extended by AI. We recommend running [Claude Code](https://claude.ai/claude-code) in the repo to help you add new models, serving backends, and clients, or to customize the experience for your hardware and workflow. The manifest-driven architecture and the `CLAUDE.md` file give Claude full context on how the project fits together — just describe what you want and it can write the manifest, update `config.yaml`, and wire everything in.
+
 ## How it works
 
 The launcher is manifest-driven. Each serving backend (`serving/<name>/manifest.yaml`) and client (`clients/<name>/manifest.yaml`) declares how to install, run, and update itself. To add a new backend or client, drop a directory with a `manifest.yaml` — in most cases no Python changes are needed.
