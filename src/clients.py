@@ -180,6 +180,7 @@ def _start_client_inner(
         "backend_port": str(backend_port),
         "backend_name": backend_name_actual,
         "served_model_name": served_model_name(model_cfg, backend_cfg),
+        "repo_root": str(repo_root),
     }
     if client.port:
         variables["port"] = str(client.port)

@@ -1,0 +1,39 @@
+name: comfyui
+install_type: container
+image: howeszy/comfyui-arm64:0.3.65
+port: 8188
+
+# ComfyUI is a diffusion-model server *and* its own web UI — unlike the LLM
+# backends here, no separate client is needed. The user opens localhost:8188
+# and drives generation from the node graph in the browser.
+#
+# "Ready" for ComfyUI means the HTTP server is up; model loading happens
+# lazily on the first workflow run, not at container start. So /system_stats
+# returns 200 within seconds and the launcher's normal health-check loop works.
+health_path: /system_stats
+health_timeout: 120
+
+# The HF snapshot for a Flux model contains both an all-in-one .safetensors
+# and Diffusers-style split folders (transformer/, text_encoder/, vae/...).
+# We bind-mount the snapshot root into all three ComfyUI model dirs so any
+# stock Flux workflow can find what it needs without the user knowing the
+# layout. Read-only — generation only writes to /app/output.
+#
+# /app/output uses a Docker named volume (same pattern as the Open WebUI
+# client) so generated images survive `./launcher stop`.  /app/user is NOT
+# mounted — the dir doesn't exist in the image, so a volume mount creates it
+# as root and the uid-1001 container process can't write to it.  User
+# settings are ephemeral for now; workflows can be saved via the browser.
+#
+# --ipc=host + memlock/stack ulimits are NVIDIA's recommended PyTorch flags
+# (the howeszy image prints a warning at boot if they're missing).
+run: "docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p {port}:8188 -v {model_path}:/app/models/diffusers/{model_name}:ro -v {model_path}:/app/models/diffusion_models/{model_name}:ro -v {model_path}:/app/models/text_encoders/{model_name}:ro -v {model_path}:/app/models/vae/{model_name}:ro -v os8-comfyui-output:/app/output {backend_env_flags} -e COMFY_CLI_ARGS=--enable-cors-header {image} {backend_args}"
+update: "docker pull {image}"
+
+# Klein-4B is Apache 2.0 and not gated, but flux2-dev and other Flux variants
+# are gated on HF. Declaring hf_token here lets the same manifest serve both.
+credentials:
+  - hf_token
+
+download:
+  type: hf-snapshot

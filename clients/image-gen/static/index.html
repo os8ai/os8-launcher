@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>os8 image-gen</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+header {
+  width: 100%;
+  padding: 0.75rem 1.5rem;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+header h1 { font-size: 1.1rem; color: #e94560; font-weight: 600; }
+header .subtitle { font-size: 0.8rem; color: #888; }
+.container {
+  width: 100%;
+  max-width: 800px;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  flex: 1;
+}
+.prompt-row {
+  display: flex;
+  gap: 0.5rem;
+}
+#prompt {
+  flex: 1;
+  padding: 0.6rem 0.75rem;
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  outline: none;
+}
+#prompt:focus { border-color: #0f3460; }
+#prompt::placeholder { color: #555; }
+#generate {
+  padding: 0.6rem 1.5rem;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+#generate:hover { background: #1a4a8a; }
+#generate:disabled { opacity: 0.4; cursor: not-allowed; }
+.settings-row {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: #888;
+}
+.settings-row label { display: flex; align-items: center; gap: 0.3rem; }
+.settings-row input, .settings-row select {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  width: 70px;
+}
+.settings-row select { width: auto; }
+#status {
+  font-size: 0.8rem;
+  color: #888;
+  min-height: 1.2em;
+}
+#status.error { color: #e94560; }
+#status.generating { color: #f39c12; }
+.progress-bar {
+  height: 3px;
+  background: #2a2a4a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.progress-bar .fill {
+  height: 100%;
+  background: #e94560;
+  width: 0%;
+  transition: width 0.2s;
+}
+.image-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+}
+.image-area img {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: 8px;
+  border: 1px solid #2a2a4a;
+}
+.placeholder {
+  color: #444;
+  font-size: 0.9rem;
+  font-style: italic;
+}
+.history {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding: 0.25rem 0;
+}
+.history-item {
+  position: relative;
+  flex-shrink: 0;
+}
+.history-item img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.history-item:hover img { opacity: 1; }
+.history-item img.active { border-color: #e94560; opacity: 1; }
+.history-item .delete-btn {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #e94560;
+  color: #fff;
+  border: none;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  padding: 0;
+}
+.history-item:hover .delete-btn { opacity: 1; }
+.history-item .delete-btn:hover { background: #c0324a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>os8 image-gen</h1>
+  <span class="subtitle">flux1-schnell via ComfyUI</span>
+</header>
+<div class="container">
+  <div class="prompt-row">
+    <input type="text" id="prompt" placeholder="Describe the image you want to create..." autofocus>
+    <button id="generate">Generate</button>
+  </div>
+  <div class="settings-row">
+    <label>Width <input type="number" id="width" value="1024" step="64" min="256" max="2048"></label>
+    <label>Height <input type="number" id="height" value="1024" step="64" min="256" max="2048"></label>
+    <label>Steps <input type="number" id="steps" value="4" min="1" max="50"></label>
+    <label>Seed <input type="number" id="seed" value="-1" title="-1 = random"></label>
+  </div>
+  <div class="progress-bar"><div class="fill" id="progress"></div></div>
+  <div id="status"></div>
+  <div class="image-area" id="image-area">
+    <span class="placeholder">Your generated image will appear here</span>
+  </div>
+  <div class="history" id="history"></div>
+</div>
+<script>
+const COMFYUI = `http://${location.hostname}:8188`;
+
+// Detect which model is served by checking what's in ComfyUI's diffusion_models dir.
+// Falls back to flux1-schnell if detection fails.
+let MODEL_NAME = 'flux1-schnell';
+let DEFAULT_STEPS = 4;
+
+const MODEL_DEFAULTS = {
+  'flux1-schnell': { steps: 4 },
+  'flux1-dev':     { steps: 20 },
+};
+
+async function detectModel() {
+  try {
+    const res = await fetch(`${COMFYUI}/object_info/UNETLoader`);
+    const data = await res.json();
+    const files = data.UNETLoader.input.required.unet_name[0];
+    for (const name of Object.keys(MODEL_DEFAULTS)) {
+      if (files.some(f => f.startsWith(name + '/'))) {
+        MODEL_NAME = name;
+        DEFAULT_STEPS = MODEL_DEFAULTS[name].steps;
+        document.getElementById('steps').value = DEFAULT_STEPS;
+        document.querySelector('.subtitle').textContent = `${name} via ComfyUI`;
+        break;
+      }
+    }
+  } catch (e) { /* use defaults */ }
+}
+
+function buildWorkflow(prompt, width, height, steps, seed) {
+  return {
+    '1': {
+      class_type: 'UNETLoader',
+      inputs: {
+        unet_name: `${MODEL_NAME}/${MODEL_NAME}.safetensors`,
+        weight_dtype: 'default'
+      }
+    },
+    '2': {
+      class_type: 'DualCLIPLoader',
+      inputs: {
+        clip_name1: `${MODEL_NAME}/clip_l.safetensors`,
+        clip_name2: `${MODEL_NAME}/t5xxl_fp8_e4m3fn.safetensors`,
+        type: 'flux'
+      }
+    },
+    '3': {
+      class_type: 'VAELoader',
+      inputs: { vae_name: `${MODEL_NAME}/ae.safetensors` }
+    },
+    '4': {
+      class_type: 'CLIPTextEncodeFlux',
+      inputs: {
+        clip: ['2', 0],
+        clip_l: prompt,
+        t5xxl: prompt,
+        guidance: 3.5
+      }
+    },
+    '5': {
+      class_type: 'CLIPTextEncodeFlux',
+      inputs: { clip: ['2', 0], clip_l: '', t5xxl: '', guidance: 3.5 }
+    },
+    '6': {
+      class_type: 'EmptySD3LatentImage',
+      inputs: { width, height, batch_size: 1 }
+    },
+    '7': {
+      class_type: 'KSampler',
+      inputs: {
+        model: ['1', 0],
+        seed: seed >= 0 ? seed : Math.floor(Math.random() * 2**32),
+        steps,
+        cfg: 1.0,
+        sampler_name: 'euler',
+        scheduler: 'simple',
+        positive: ['4', 0],
+        negative: ['5', 0],
+        latent_image: ['6', 0],
+        denoise: 1.0
+      }
+    },
+    '8': {
+      class_type: 'VAEDecode',
+      inputs: { samples: ['7', 0], vae: ['3', 0] }
+    },
+    '9': {
+      class_type: 'SaveImage',
+      inputs: { images: ['8', 0], filename_prefix: 'Flux' }
+    }
+  };
+}
+
+const statusEl = document.getElementById('status');
+const progressEl = document.getElementById('progress');
+const imageArea = document.getElementById('image-area');
+const historyEl = document.getElementById('history');
+const btn = document.getElementById('generate');
+const promptInput = document.getElementById('prompt');
+
+function setStatus(msg, cls) {
+  statusEl.textContent = msg;
+  statusEl.className = cls || '';
+}
+
+function setProgress(pct) {
+  progressEl.style.width = pct + '%';
+}
+
+function showImage(url) {
+  imageArea.innerHTML = `<img src="${url}">`;
+}
+
+function addToHistory(url) {
+  const item = document.createElement('div');
+  item.className = 'history-item';
+
+  const img = document.createElement('img');
+  img.src = url;
+  img.onclick = () => {
+    showImage(url);
+    historyEl.querySelectorAll('img').forEach(i => i.classList.remove('active'));
+    img.classList.add('active');
+  };
+
+  const del = document.createElement('button');
+  del.className = 'delete-btn';
+  del.textContent = 'x';
+  del.onclick = (e) => {
+    e.stopPropagation();
+    const wasActive = img.classList.contains('active');
+    item.remove();
+    if (wasActive) {
+      const next = historyEl.querySelector('.history-item img');
+      if (next) {
+        next.classList.add('active');
+        showImage(next.src);
+      } else {
+        imageArea.innerHTML = '<span class="placeholder">Your generated image will appear here</span>';
+      }
+    }
+  };
+
+  item.append(img, del);
+
+  // Mark newest as active
+  historyEl.querySelectorAll('img').forEach(i => i.classList.remove('active'));
+  img.classList.add('active');
+  historyEl.prepend(item);
+}
+
+async function generate() {
+  const text = promptInput.value.trim();
+  if (!text) return;
+
+  const width = parseInt(document.getElementById('width').value) || 1024;
+  const height = parseInt(document.getElementById('height').value) || 1024;
+  const steps = parseInt(document.getElementById('steps').value) || 4;
+  const seed = parseInt(document.getElementById('seed').value);
+
+  btn.disabled = true;
+  setStatus('Connecting...', 'generating');
+  setProgress(0);
+
+  const clientId = crypto.randomUUID().replace(/-/g, '');
+  const workflow = buildWorkflow(text, width, height, steps, seed);
+
+  // Open WebSocket for progress
+  let ws;
+  let promptId;
+  try {
+    ws = new WebSocket(`ws://${location.hostname}:8188/ws?clientId=${clientId}`);
+  } catch (e) {
+    setStatus('Failed to connect to ComfyUI WebSocket', 'error');
+    btn.disabled = false;
+    return;
+  }
+
+  const done = new Promise((resolve, reject) => {
+    ws.onmessage = (event) => {
+      if (typeof event.data !== 'string') return; // skip binary previews
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'progress' && msg.data.prompt_id === promptId) {
+        const pct = (msg.data.value / msg.data.max) * 100;
+        setProgress(pct);
+        setStatus(`Generating... step ${msg.data.value}/${msg.data.max}`, 'generating');
+      }
+      if (msg.type === 'executing' && msg.data.prompt_id === promptId) {
+        const node = msg.data.node;
+        if (node === '1') setStatus('Loading model...', 'generating');
+        else if (node === '2') setStatus('Loading text encoders...', 'generating');
+        else if (node === '7') setStatus('Sampling...', 'generating');
+        else if (node === '8') setStatus('Decoding...', 'generating');
+        else if (node === null) { resolve(); }
+      }
+      if (msg.type === 'execution_error' && msg.data.prompt_id === promptId) {
+        reject(new Error(msg.data.exception_message || 'Generation failed'));
+      }
+    };
+    ws.onerror = () => reject(new Error('WebSocket error'));
+  });
+
+  // Wait for WS to open, then submit
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = () => reject(new Error('Cannot connect to ComfyUI'));
+  }).catch(e => {
+    setStatus(e.message, 'error');
+    btn.disabled = false;
+    throw e;
+  });
+
+  setStatus('Submitting prompt...', 'generating');
+  try {
+    const res = await fetch(`${COMFYUI}/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: workflow, client_id: clientId })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message || 'Prompt rejected');
+    promptId = data.prompt_id;
+    setStatus('Queued, waiting for execution...', 'generating');
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, 'error');
+    ws.close();
+    btn.disabled = false;
+    return;
+  }
+
+  // Wait for completion
+  try {
+    await done;
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, 'error');
+    ws.close();
+    btn.disabled = false;
+    return;
+  }
+
+  ws.close();
+
+  // Fetch the result image from history
+  try {
+    const histRes = await fetch(`${COMFYUI}/history/${promptId}`);
+    const hist = await histRes.json();
+    const outputs = hist[promptId]?.outputs || {};
+    for (const nodeOut of Object.values(outputs)) {
+      if (nodeOut.images) {
+        const img = nodeOut.images[0];
+        const url = `${COMFYUI}/view?filename=${encodeURIComponent(img.filename)}&type=${img.type}&subfolder=${encodeURIComponent(img.subfolder || '')}`;
+        showImage(url);
+        addToHistory(url);
+        break;
+      }
+    }
+    setStatus('Done!', '');
+    setProgress(100);
+  } catch (e) {
+    setStatus(`Error fetching image: ${e.message}`, 'error');
+  }
+
+  btn.disabled = false;
+}
+
+btn.addEventListener('click', generate);
+promptInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !btn.disabled) generate();
+});
+
+// Check ComfyUI connection and detect model on load
+fetch(`${COMFYUI}/system_stats`)
+  .then(r => r.json())
+  .then(async (d) => {
+    await detectModel();
+    setStatus(`Connected to ComfyUI ${d.system.comfyui_version} - ${MODEL_NAME}`);
+  })
+  .catch(() => setStatus('Cannot reach ComfyUI at ' + COMFYUI, 'error'));
+</script>
+</body>
+</html>

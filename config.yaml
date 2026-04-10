@@ -69,6 +69,35 @@ models:
       VLLM_USE_FLASHINFER_MOE_FP4: "0"
     backend_args: "--max-model-len 32768 --gpu-memory-utilization 0.85"
 
+  # --- image generation: Flux.1 schnell, Apache 2.0, gated (contact info required) ---
+  # ComfyUI is the serving backend; open localhost:8188 after `./launcher serve`.
+  # Accept the license at https://huggingface.co/black-forest-labs/FLUX.1-schnell
+  # before downloading. hf_token must be set in credentials.
+  flux1-schnell:
+    source: black-forest-labs/FLUX.1-schnell
+    path: models/flux1-schnell/weights
+    format: safetensors
+    backends: [comfyui]
+    default_backend: comfyui
+    downloaded: false
+    size_gb: 34
+    backend_env: {}
+    backend_args: ""
+
+  # --- image generation: Flux.1 dev, non-commercial, gated, higher quality ---
+  # Same backend/client as schnell but designed for 20+ steps.
+  # Accept the license at https://huggingface.co/black-forest-labs/FLUX.1-dev
+  flux1-dev:
+    source: black-forest-labs/FLUX.1-dev
+    path: models/flux1-dev/weights
+    format: safetensors
+    backends: [comfyui]
+    default_backend: comfyui
+    downloaded: false
+    size_gb: 34
+    backend_env: {}
+    backend_args: ""
+
 backends:
   nim:
     manifest: serving/nim/manifest.yaml
@@ -82,6 +111,9 @@ backends:
   ollama:
     manifest: serving/ollama/manifest.yaml
     port: 11434
+  comfyui:
+    manifest: serving/comfyui/manifest.yaml
+    port: 8188
 
 clients:
   aider:
@@ -91,6 +123,9 @@ clients:
   open-webui:
     manifest: clients/open-webui/manifest.yaml
     port: 3000
+  image-gen:
+    manifest: clients/image-gen/manifest.yaml
+    port: 9001
   os8:
     type: bridge
     port: 8000
