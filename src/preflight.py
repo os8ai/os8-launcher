@@ -125,6 +125,38 @@ def check_python() -> tuple[bool, str]:
     return True, ""
 
 
+def check_python_dev() -> tuple[bool, str]:
+    """Check that the Python development headers and gcc are available.
+
+    Required by pip backends that build C extensions at runtime — most
+    notably Triton, which compiles a small CUDA shim on first import.
+    Without Python.h the build fails with an opaque gcc traceback deep
+    inside the backend, so we surface it up front at setup time.
+    """
+    if not shutil.which("gcc"):
+        return False, (
+            "gcc not found.\n"
+            "Install it with: sudo apt install build-essential"
+        )
+
+    # Use sysconfig so we don't hardcode the Python version into the path.
+    result = subprocess.run(
+        ["python3", "-c",
+         "import os, sysconfig; "
+         "p = os.path.join(sysconfig.get_path('include'), 'Python.h'); "
+         "print(p if os.path.exists(p) else '')"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if not result.stdout.strip():
+        return False, (
+            "Python development headers (Python.h) not found.\n"
+            "Required for backends that build C extensions (e.g. Triton).\n"
+            "Install with: sudo apt install python3-dev"
+        )
+
+    return True, ""
+
+
 def check_disk_space(path: str, required_gb: float) -> tuple[bool, str]:
     """Check that there's enough free disk space at the given path."""
     try:

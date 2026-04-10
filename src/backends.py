@@ -295,6 +295,7 @@ def _start_pip_process(
     venv_path: Path,
     extra_env: dict | None = None,
     log_path: Path | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.Popen:
     """Start a pip-based backend as a background subprocess.
 
@@ -311,6 +312,7 @@ def _start_pip_process(
     process = subprocess.Popen(
         cmd,
         env=env,
+        cwd=str(cwd) if cwd else None,
         stdout=out,
         stderr=subprocess.STDOUT if log_path else subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
@@ -585,9 +587,12 @@ def _start_backend_inner(
                 f"Backend '{backend_name}' is not installed.\n"
                 f"Run: ./launcher setup {backend_name}"
             )
-        extra_env = manifest.fields.get("env") if manifest.fields.get("env") else None
+        raw_env = manifest.fields.get("env") or {}
+        extra_env = {k: expand_template(v, variables) for k, v in raw_env.items()} if raw_env else None
         log_path = container_log_path(backend_name, repo_root)
-        process = _start_pip_process(cmd_string, venv_path, extra_env, log_path=log_path)
+        cwd_rel = manifest.fields.get("cwd")
+        cwd = repo_root / cwd_rel if cwd_rel else None
+        process = _start_pip_process(cmd_string, venv_path, extra_env, log_path=log_path, cwd=cwd)
         pid = process.pid
         print(f"  Streaming logs to: {log_path.relative_to(repo_root)}")
         print(f"  Process started: PID {pid}")

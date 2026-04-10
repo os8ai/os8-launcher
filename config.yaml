@@ -98,6 +98,20 @@ models:
     backend_env: {}
     backend_args: ""
 
+  # --- text-to-speech: Fish Audio S2 Pro, Dual-AR 4.5B, 80+ languages ---
+  # Zero-shot voice cloning from 10-30s reference audio.  Inline prosody
+  # tags ([whisper], [excited], etc.) for fine-grained control.
+  fish-s2-pro:
+    source: fishaudio/s2-pro
+    path: models/fish-s2-pro/weights
+    format: bf16
+    backends: [fish-speech]
+    default_backend: fish-speech
+    downloaded: false
+    size_gb: 11
+    backend_env: {}
+    backend_args: ""
+
 backends:
   nim:
     manifest: serving/nim/manifest.yaml
@@ -114,6 +128,9 @@ backends:
   comfyui:
     manifest: serving/comfyui/manifest.yaml
     port: 8188
+  fish-speech:
+    manifest: serving/fish-speech/manifest.yaml
+    port: 8080
 
 clients:
   aider:
@@ -126,6 +143,9 @@ clients:
   image-gen:
     manifest: clients/image-gen/manifest.yaml
     port: 9001
+  tts:
+    manifest: clients/tts/manifest.yaml
+    port: 9002
   os8:
     type: bridge
     port: 8000

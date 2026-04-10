@@ -11,10 +11,19 @@ from src.preflight import (
     check_docker,
     check_nvidia_container_toolkit,
     check_python,
+    check_python_dev,
     detect_arch,
     resolve_image,
     run_checks,
 )
+
+
+# Maps `requires:` entries in a manifest to the preflight check that
+# enforces them.  Add new entries here as backends grow new prerequisites
+# (e.g. ffmpeg, git, build-essential variants).
+_CHECK_REGISTRY = {
+    "python_dev": ("Python development headers", check_python_dev),
+}
 
 
 class InstallError(Exception):
@@ -68,7 +77,18 @@ def _run_command(cmd: list[str], label: str, env: dict | None = None) -> bool:
 
 def _install_pip(manifest: ManifestConfig, repo_root: Path):
     """Install a pip-based tool into its own venv."""
-    if not run_checks([("Python 3", check_python())]):
+    checks = [("Python 3", check_python())]
+    for req in manifest.fields.get("requires") or []:
+        entry = _CHECK_REGISTRY.get(req)
+        if entry is None:
+            raise InstallError(
+                f"Manifest for '{manifest.name}' references unknown check "
+                f"'{req}'. Known checks: {', '.join(sorted(_CHECK_REGISTRY))}"
+            )
+        label, check_fn = entry
+        checks.append((label, check_fn()))
+
+    if not run_checks(checks):
         raise InstallError("Prerequisites not met.")
 
     package = manifest.fields.get("package")
@@ -87,15 +107,33 @@ def _install_pip(manifest: ManifestConfig, repo_root: Path):
         if not _run_command(["python3", "-m", "venv", str(venv_path)], "venv creation"):
             raise InstallError("Failed to create virtual environment.")
 
-    # Install package
-    print(f"  Installing {package}...")
-    if not _run_command([str(pip_path), "install", package], f"{package} install"):
+    # Install package — use install_cmd if provided (for multi-step or
+    # platform-specific installs), otherwise fall back to pip install.
+    install_cmd = manifest.fields.get("install_cmd")
+    if install_cmd:
+        print(f"  Running install command for {manifest.name}...")
         arch = detect_arch()
-        raise InstallError(
-            f"Failed to install {package}.\n"
-            f"This may be a compatibility issue — check if {package} "
-            f"publishes {arch['machine']} wheels."
+        env = {
+            **os.environ,
+            "ARCH": arch["machine"],
+            "ARCH_DOCKER": arch["docker"],
+            "VIRTUAL_ENV": str(venv_path),
+            "PATH": f"{venv_path / 'bin'}:{os.environ.get('PATH', '')}",
+        }
+        result = subprocess.run(
+            install_cmd, shell=True, cwd=str(repo_root), timeout=1200, env=env,
         )
+        if result.returncode != 0:
+            raise InstallError(f"Install command for {manifest.name} failed.")
+    else:
+        print(f"  Installing {package}...")
+        if not _run_command([str(pip_path), "install", package], f"{package} install"):
+            arch = detect_arch()
+            raise InstallError(
+                f"Failed to install {package}.\n"
+                f"This may be a compatibility issue — check if {package} "
+                f"publishes {arch['machine']} wheels."
+            )
 
     print(f"  {manifest.name} installed successfully.")
 

@@ -5,6 +5,9 @@ models/*/weights/
 serving/*/venv/
 clients/*/venv/
 
+# Cloned upstream repos (installed at setup time)
+serving/*/repo/
+
 # Downloaded binaries and shared libs
 serving/*/bin/
 serving/*/lib/

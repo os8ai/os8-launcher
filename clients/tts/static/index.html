@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>os8 tts</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+header {
+  width: 100%;
+  padding: 0.75rem 1.5rem;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+header h1 { font-size: 1.1rem; color: #e94560; font-weight: 600; }
+header .subtitle { font-size: 0.8rem; color: #888; }
+.container {
+  width: 100%;
+  max-width: 800px;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  flex: 1;
+}
+.prompt-row {
+  display: flex;
+  gap: 0.5rem;
+}
+#text {
+  flex: 1;
+  padding: 0.6rem 0.75rem;
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  outline: none;
+  min-height: 80px;
+  resize: vertical;
+}
+#text:focus { border-color: #0f3460; }
+#text::placeholder { color: #555; }
+#speak {
+  padding: 0.6rem 1.5rem;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  white-space: nowrap;
+  align-self: flex-end;
+}
+#speak:hover { background: #1a4a8a; }
+#speak:disabled { opacity: 0.4; cursor: not-allowed; }
+.settings-row {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: #888;
+  flex-wrap: wrap;
+}
+.settings-row label { display: flex; align-items: center; gap: 0.3rem; }
+.settings-row input, .settings-row select {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+}
+.settings-row input[type="number"] { width: 55px; }
+.settings-row input[type="range"] { width: 80px; }
+.settings-row select { width: auto; }
+.tags-row {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.tag-btn {
+  padding: 0.25rem 0.5rem;
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #999;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-family: inherit;
+}
+.tag-btn:hover { border-color: #0f3460; color: #e0e0e0; }
+#status {
+  font-size: 0.8rem;
+  color: #888;
+  min-height: 1.2em;
+}
+#status.error { color: #e94560; }
+#status.generating { color: #f39c12; }
+.ref-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.ref-section summary {
+  font-size: 0.85rem;
+  color: #888;
+  cursor: pointer;
+  user-select: none;
+}
+.ref-section summary:hover { color: #e0e0e0; }
+.ref-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: #16213e;
+  border-radius: 6px;
+  border: 1px solid #2a2a4a;
+}
+.ref-inner label { font-size: 0.8rem; color: #888; }
+.ref-inner input[type="file"] { font-size: 0.8rem; color: #888; }
+.ref-inner textarea {
+  padding: 0.4rem 0.6rem;
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 40px;
+  outline: none;
+}
+.audio-area {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+}
+.audio-area audio {
+  width: 100%;
+  max-width: 600px;
+}
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  background: #16213e;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+.history-item .text-preview {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #888;
+}
+.history-item button {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0.15rem 0.3rem;
+}
+.history-item button:hover { color: #e0e0e0; }
+.history-item .delete-btn:hover { color: #e94560; }
+</style>
+</head>
+<body>
+<header>
+  <h1>os8 tts</h1>
+  <span class="subtitle">Fish Audio S2 Pro</span>
+</header>
+<div class="container">
+  <div class="prompt-row">
+    <textarea id="text" placeholder="Enter text to speak..." autofocus></textarea>
+  </div>
+  <div class="tags-row">
+    <button class="tag-btn" data-tag="[laughs]">[laughs]</button>
+    <button class="tag-btn" data-tag="[whisper]">[whisper]</button>
+    <button class="tag-btn" data-tag="[excited]">[excited]</button>
+    <button class="tag-btn" data-tag="[sad]">[sad]</button>
+    <button class="tag-btn" data-tag="[angry]">[angry]</button>
+    <button class="tag-btn" data-tag="[giggles]">[giggles]</button>
+    <button class="tag-btn" data-tag="[sighs]">[sighs]</button>
+    <button class="tag-btn" data-tag="[pause]">...</button>
+  </div>
+  <div class="settings-row">
+    <label>Speed <input type="range" id="speed" min="0.5" max="2.0" step="0.1" value="1.0"><span id="speed-val">1.0</span></label>
+    <label>Temp <input type="number" id="temperature" value="0.7" min="0.0" max="1.5" step="0.1"></label>
+    <label>Format
+      <select id="format">
+        <option value="wav">WAV</option>
+        <option value="mp3">MP3</option>
+        <option value="opus">Opus</option>
+      </select>
+    </label>
+    <label>Latency
+      <select id="latency">
+        <option value="normal">Normal</option>
+        <option value="balanced">Balanced (higher quality)</option>
+      </select>
+    </label>
+  </div>
+  <details class="ref-section">
+    <summary>Voice cloning (optional)</summary>
+    <div class="ref-inner">
+      <label>Reference audio (10-30s clip)</label>
+      <input type="file" id="ref-audio" accept="audio/*">
+      <label>Reference text (what the audio says)</label>
+      <textarea id="ref-text" placeholder="Transcription of the reference audio..."></textarea>
+    </div>
+  </details>
+  <button id="speak">Speak</button>
+  <div id="status"></div>
+  <div class="audio-area" id="audio-area">
+    <span class="placeholder" style="color:#444; font-size:0.9rem; font-style:italic;">Generated audio will appear here</span>
+  </div>
+  <div class="history" id="history"></div>
+</div>
+<script>
+const API = `http://${location.hostname}:8080`;
+const statusEl = document.getElementById('status');
+const audioArea = document.getElementById('audio-area');
+const historyEl = document.getElementById('history');
+const btn = document.getElementById('speak');
+const textInput = document.getElementById('text');
+const speedSlider = document.getElementById('speed');
+const speedVal = document.getElementById('speed-val');
+
+speedSlider.addEventListener('input', () => { speedVal.textContent = speedSlider.value; });
+
+// Insert prosody tags at cursor
+document.querySelectorAll('.tag-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    const tag = b.dataset.tag;
+    const start = textInput.selectionStart;
+    const end = textInput.selectionEnd;
+    const val = textInput.value;
+    textInput.value = val.slice(0, start) + tag + val.slice(end);
+    textInput.selectionStart = textInput.selectionEnd = start + tag.length;
+    textInput.focus();
+  });
+});
+
+function setStatus(msg, cls) {
+  statusEl.textContent = msg;
+  statusEl.className = cls || '';
+}
+
+async function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function showAudio(url) {
+  audioArea.innerHTML = `<audio controls autoplay src="${url}"></audio>`;
+}
+
+function addToHistory(url, text) {
+  const item = document.createElement('div');
+  item.className = 'history-item';
+
+  const preview = document.createElement('span');
+  preview.className = 'text-preview';
+  preview.textContent = text.slice(0, 80);
+
+  const playBtn = document.createElement('button');
+  playBtn.textContent = 'play';
+  playBtn.onclick = () => showAudio(url);
+
+  const dlBtn = document.createElement('button');
+  dlBtn.textContent = 'save';
+  dlBtn.onclick = () => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'tts-output.' + document.getElementById('format').value;
+    a.click();
+  };
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'delete-btn';
+  delBtn.textContent = 'x';
+  delBtn.onclick = () => {
+    URL.revokeObjectURL(url);
+    item.remove();
+  };
+
+  item.append(preview, playBtn, dlBtn, delBtn);
+  historyEl.prepend(item);
+}
+
+async function speak() {
+  const text = textInput.value.trim();
+  if (!text) return;
+
+  btn.disabled = true;
+  setStatus('Generating speech...', 'generating');
+
+  const body = {
+    text: text,
+    temperature: parseFloat(document.getElementById('temperature').value) || 0.7,
+    top_p: 0.9,
+    speed: parseFloat(speedSlider.value) || 1.0,
+    format: document.getElementById('format').value,
+    latency: document.getElementById('latency').value,
+  };
+
+  // Add voice clone reference if provided
+  const refFile = document.getElementById('ref-audio').files[0];
+  const refText = document.getElementById('ref-text').value.trim();
+  if (refFile) {
+    const audioBase64 = await fileToBase64(refFile);
+    body.references = [{ audio: audioBase64, text: refText }];
+  }
+
+  try {
+    const res = await fetch(`${API}/v1/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`${res.status}: ${err}`);
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    showAudio(url);
+    addToHistory(url, text);
+    setStatus('Done!', '');
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, 'error');
+  }
+
+  btn.disabled = false;
+}
+
+btn.addEventListener('click', speak);
+textInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.ctrlKey && !btn.disabled) speak();
+});
+
+// Check backend connection on load
+fetch(`${API}/v1/health`)
+  .then(r => {
+    if (r.ok) setStatus('Connected to Fish Speech');
+    else throw new Error(`status ${r.status}`);
+  })
+  .catch(() => setStatus('Cannot reach Fish Speech at ' + API, 'error'));
+</script>
+</body>
+</html>

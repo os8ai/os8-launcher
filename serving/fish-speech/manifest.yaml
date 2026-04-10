@@ -1,0 +1,48 @@
+name: fish-speech
+install_type: pip
+package: fish-speech
+venv: serving/fish-speech/venv
+requires:
+  - python_dev    # Triton compiles a CUDA shim at runtime; needs Python.h + gcc
+
+# Fish Speech S2 Pro is a Dual-AR TTS model (~4.5B params).  The official
+# Docker images are amd64-only, so on the Spark (aarch64) we install via pip
+# into an isolated venv and run from a local clone of the repo.
+#
+# install_cmd handles the multi-step install:
+#   1. PyTorch+CUDA from the cu130 index (PyPI default for aarch64 is CPU-only;
+#      cu130 ships nvrtc that recognizes Blackwell sm_121 — cu128 does not)
+#   2. Clone the fish-speech repo (the project isn't properly packaged for pip)
+#   3. Install remaining deps into the venv (pyaudio is excluded since the
+#      API server doesn't need mic input and it pulls in portaudio19-dev)
+install_cmd: |
+  set -e
+  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu130
+  if [ ! -d serving/fish-speech/repo ]; then
+    git clone --depth 1 https://github.com/fishaudio/fish-speech.git serving/fish-speech/repo
+  else
+    git -C serving/fish-speech/repo pull --ff-only || true
+  fi
+  pip install numpy transformers datasets lightning hydra-core tensorboard natsort einops librosa rich gradio wandb grpcio kui uvicorn loguru loralib pyrootutils resampy "einx[torch]==0.2.2" zstandard pydub modelscope opencc-python-reimplemented silero-vad ormsgpack tiktoken "pydantic==2.9.2" cachetools descript-audio-codec safetensors typing_extensions sympy
+
+health_path: /v1/health
+health_timeout: 600
+port: 8080
+
+env:
+  CUDA_CACHE_PATH: "{repo_root}/var/cache/cuda"
+  CUDA_CACHE_MAXSIZE: "4294967296"
+
+# --compile enables torch.compile/Triton for a major inference speedup.
+# --half forces fp16 throughout, reducing memory bandwidth pressure.
+# First start is slow (Triton kernel compilation + warmup); subsequent
+# starts reuse cached kernels.  The python_dev preflight check above
+# enforces that Python.h and gcc are present before setup runs.
+run: "python tools/api_server.py --listen 0.0.0.0:{port} --llama-checkpoint-path {model_path} --decoder-checkpoint-path {model_path}/codec.pth --compile --half {backend_args}"
+cwd: serving/fish-speech/repo
+
+credentials:
+  - hf_token
+
+download:
+  type: hf-snapshot
