@@ -5,7 +5,6 @@ A unified system for running local open-source AI models. The user picks a combi
 ## Project Info
 
 - **Repo:** git@github.com:os8ai/os8-launcher.git (open source)
-- **Local path:** `/home/leo/Claude/os8-launcher`
 - **Git identity (this repo):** OS8 / leo@os8.ai
 - **Language:** Python
 - **Web framework:** FastAPI (backend) + static HTML/JS/CSS (frontend, **no build step — don't introduce npm/React/bundlers**)
@@ -20,7 +19,7 @@ A unified system for running local open-source AI models. The user picks a combi
 
 ## Related Projects
 
-- **OS8** — `/home/leo/Claude/os8` — the personal AI operating system that os8-launcher will integrate with as a local model provider (Milestone 2). OS8 is an Electron + Express app with its own backend-adapter system for Claude, Gemini, Codex, and Grok.
+- **OS8** — the personal AI operating system that os8-launcher will integrate with as a local model provider (Milestone 2). OS8 is an Electron + Express app with its own backend-adapter system for Claude, Gemini, Codex, and Grok. See [github.com/os8ai](https://github.com/os8ai).
 
 ## Architecture (quick reference)
 
