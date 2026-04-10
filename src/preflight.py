@@ -4,8 +4,43 @@ Each check function returns (ok, message). On success, message is empty.
 On failure, message contains an actionable description of what's missing and how to fix it.
 """
 
+import platform
 import shutil
 import subprocess
+
+# ---------------------------------------------------------------------------
+# Architecture detection
+# ---------------------------------------------------------------------------
+
+_ARCH_MAP = {
+    "aarch64": {"machine": "aarch64", "docker": "arm64"},
+    "x86_64":  {"machine": "x86_64",  "docker": "amd64"},
+}
+
+
+def detect_arch() -> dict[str, str]:
+    """Return a dict with 'machine' and 'docker' keys for the current CPU architecture.
+
+    Raises RuntimeError on unsupported architectures.
+    """
+    machine = platform.machine()
+    if machine not in _ARCH_MAP:
+        supported = ", ".join(_ARCH_MAP)
+        raise RuntimeError(
+            f"Unsupported architecture: {machine}. Supported: {supported}"
+        )
+    return _ARCH_MAP[machine]
+
+
+def resolve_image(manifest_fields: dict) -> str:
+    """Return the arch-appropriate Docker image from manifest fields.
+
+    Checks for image_{machine} (e.g. image_aarch64, image_x86_64) first,
+    then falls back to the plain 'image' field.
+    """
+    arch = detect_arch()
+    arch_key = f"image_{arch['machine']}"
+    return manifest_fields.get(arch_key, manifest_fields.get("image", ""))
 
 
 def check_docker() -> tuple[bool, str]:
@@ -148,6 +183,88 @@ def check_hf_auth(hf_token: str | None) -> tuple[bool, str]:
         return False, "HuggingFace token appears invalid (should start with 'hf_')."
 
     return True, ""
+
+
+def check_cuda_version() -> tuple[bool, str]:
+    """Check that CUDA is available and report its version."""
+    if not shutil.which("nvidia-smi"):
+        return False, "nvidia-smi not found. NVIDIA drivers may not be installed."
+
+    result = subprocess.run(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        return False, "Could not query NVIDIA driver version."
+
+    # CUDA version is shown in the nvidia-smi header, query it directly.
+    result = subprocess.run(
+        ["nvidia-smi"],
+        capture_output=True, text=True, timeout=10,
+    )
+    for line in result.stdout.splitlines():
+        if "CUDA Version" in line:
+            # Line looks like: "| NVIDIA-SMI 580.142  Driver Version: 580.142  CUDA Version: 13.0  |"
+            for part in line.split():
+                try:
+                    # The token right after "Version:" that looks like a number
+                    idx = line.index("CUDA Version:")
+                    version = line[idx:].split()[2].rstrip("|").strip()
+                    return True, version
+                except (ValueError, IndexError):
+                    pass
+
+    return False, "Could not determine CUDA version from nvidia-smi output."
+
+
+def check_available_memory(min_gb: float = 8.0) -> tuple[bool, str]:
+    """Check total and available system RAM from /proc/meminfo."""
+    try:
+        meminfo = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(":")] = int(parts[1])  # kB
+
+        total_gb = meminfo.get("MemTotal", 0) / (1024 * 1024)
+        avail_gb = meminfo.get("MemAvailable", 0) / (1024 * 1024)
+
+        if total_gb < min_gb:
+            return False, (
+                f"Insufficient RAM: {total_gb:.0f} GB total, {min_gb:.0f} GB minimum recommended."
+            )
+        return True, f"{total_gb:.0f} GB total, {avail_gb:.0f} GB available"
+
+    except OSError as e:
+        return False, f"Could not read /proc/meminfo: {e}"
+
+
+def get_gpu_info() -> dict | None:
+    """Return GPU name and memory, or None if unavailable."""
+    if not shutil.which("nvidia-smi"):
+        return None
+
+    result = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        return None
+
+    line = result.stdout.strip().split("\n")[0]
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) < 2:
+        return None
+
+    name = parts[0]
+    # memory.total comes back like "131072 MiB"
+    try:
+        memory_gb = float(parts[1].split()[0]) / 1024
+    except (ValueError, IndexError):
+        memory_gb = 0.0
+
+    return {"name": name, "memory_gb": memory_gb}
 
 
 def run_checks(checks: list[tuple[str, tuple[bool, str]]]) -> bool:

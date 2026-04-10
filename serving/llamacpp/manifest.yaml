@@ -2,8 +2,28 @@ name: llamacpp
 install_type: binary
 source: https://github.com/ggerganov/llama.cpp/releases
 binary: serving/llamacpp/bin/llama-server
+
+# Download the latest CUDA-enabled release for the detected architecture.
+# $ARCH is injected by the launcher (aarch64 or x86_64).
+# llama.cpp uses "arm64" / "x64" in its asset names.
+install_cmd: |
+  set -e
+  if [ "$ARCH" = "x86_64" ]; then LLAMA_ARCH="x64"; else LLAMA_ARCH="arm64"; fi
+  TAG=$(curl -sL https://api.github.com/repos/ggerganov/llama.cpp/releases/latest \
+    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+  ASSET="llama-${TAG}-bin-ubuntu-${LLAMA_ARCH}.tar.gz"
+  URL="https://github.com/ggerganov/llama.cpp/releases/download/${TAG}/${ASSET}"
+  echo "Downloading llama.cpp ${TAG} for ${LLAMA_ARCH}..."
+  curl -fSL "$URL" -o /tmp/llamacpp.tar.gz
+  mkdir -p serving/llamacpp/bin
+  tar xzf /tmp/llamacpp.tar.gz -C /tmp/llamacpp-extract --strip-components=1 2>/dev/null \
+    || (mkdir -p /tmp/llamacpp-extract && tar xzf /tmp/llamacpp.tar.gz -C /tmp/llamacpp-extract)
+  cp /tmp/llamacpp-extract/llama-server serving/llamacpp/bin/ \
+    || cp /tmp/llamacpp-extract/*/llama-server serving/llamacpp/bin/
+  chmod +x serving/llamacpp/bin/llama-server
+  rm -rf /tmp/llamacpp.tar.gz /tmp/llamacpp-extract
+
 run: "{binary} -m {model_path} --port {port}"
-update: "download latest release"
 
 # llama.cpp consumes GGUF files; download from HF (often gated).
 credentials:

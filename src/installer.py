@@ -1,5 +1,6 @@
 """Install, update, and check status of backends and clients from manifests."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,8 @@ from src.preflight import (
     check_docker,
     check_nvidia_container_toolkit,
     check_python,
+    detect_arch,
+    resolve_image,
     run_checks,
 )
 
@@ -87,10 +90,11 @@ def _install_pip(manifest: ManifestConfig, repo_root: Path):
     # Install package
     print(f"  Installing {package}...")
     if not _run_command([str(pip_path), "install", package], f"{package} install"):
+        arch = detect_arch()
         raise InstallError(
             f"Failed to install {package}.\n"
-            f"This may be an aarch64 compatibility issue — check if {package} "
-            f"publishes ARM wheels."
+            f"This may be a compatibility issue — check if {package} "
+            f"publishes {arch['machine']} wheels."
         )
 
     print(f"  {manifest.name} installed successfully.")
@@ -136,7 +140,7 @@ def _install_container(manifest: ManifestConfig, config: Config):
         ("Docker", check_docker()),
     ]
 
-    image = manifest.fields.get("image", "")
+    image = resolve_image(manifest.fields)
     download_cfg = manifest.fields.get("download") or {}
     is_per_model_image = download_cfg.get("type") == "image-pull"
 
@@ -250,8 +254,10 @@ def _install_binary(manifest: ManifestConfig, repo_root: Path):
     if install_cmd:
         print(f"  Running install command for {manifest.name}...")
         print(f"  $ {install_cmd}")
+        arch = detect_arch()
+        env = {**os.environ, "ARCH": arch["machine"], "ARCH_DOCKER": arch["docker"]}
         result = subprocess.run(
-            install_cmd, shell=True, cwd=str(repo_root), timeout=600,
+            install_cmd, shell=True, cwd=str(repo_root), timeout=600, env=env,
         )
         if result.returncode != 0:
             raise InstallError(f"Install command for {manifest.name} failed.")
@@ -263,10 +269,11 @@ def _install_binary(manifest: ManifestConfig, repo_root: Path):
         print(f"  {manifest.name} installed successfully.")
         return
 
+    arch = detect_arch()
     print(f"  Binary install for {manifest.name}:")
     if source:
         print(f"    Download from: {source}")
-    print(f"    Platform: linux-aarch64")
+    print(f"    Platform: linux-{arch['machine']}")
     print(f"    Place binary at: {binary_rel}")
     print(f"    Make executable: chmod +x {binary_rel}")
     print()
@@ -402,7 +409,7 @@ def get_tool_status(name: str, config: Config, repo_root: Path) -> str:
                 return "installed"
             return "not installed"
         case "container":
-            image = manifest.fields.get("image", "")
+            image = resolve_image(manifest.fields)
             download_cfg = manifest.fields.get("download") or {}
             if download_cfg.get("type") == "image-pull":
                 # Per-model images — installed if any model's image is cached.

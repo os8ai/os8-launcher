@@ -40,6 +40,7 @@ from src.preflight import (
     check_docker,
     check_nvidia_container_toolkit,
     check_nvidia_gpu,
+    resolve_image,
     run_checks,
 )
 from src.runtime import check_port, expand_template, build_env_for_venv, parse_command
@@ -164,9 +165,9 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
         if value:
             variables[cred_name] = value
 
-    # Container image from manifest
+    # Container image from manifest (arch-aware: prefers image_{machine})
     if backend.manifest and "image" in backend.manifest.fields:
-        variables["image"] = backend.manifest.fields["image"]
+        variables["image"] = resolve_image(backend.manifest.fields)
 
     # Binary-specific
     if backend.manifest and "binary" in backend.manifest.fields:
@@ -560,7 +561,7 @@ def _start_backend_inner(
         if image_field:
             image_to_check = getattr(model, image_field, None)
         if not image_to_check:
-            image_to_check = manifest.fields.get("image") if manifest.fields else None
+            image_to_check = resolve_image(manifest.fields) if manifest.fields else None
         if image_to_check:
             ngc_key_for_pull = get_ngc_key() if "nvcr.io" in image_to_check else None
             _ensure_image_present(image_to_check, ngc_key=ngc_key_for_pull)
@@ -659,7 +660,7 @@ def _start_backend_inner(
     # 10. Record verification + report success
     runtime_id = (
         model.nim_image
-        or (manifest.fields.get("image") if manifest.fields else None)
+        or (resolve_image(manifest.fields) if manifest.fields else None)
         or manifest.install_type
     )
     record_success(model_name, backend_name, runtime=runtime_id)

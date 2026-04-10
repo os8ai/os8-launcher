@@ -114,7 +114,7 @@ The bridge is a later milestone. os8-launcher works fully standalone first.
 
 ### Key OS8 integration points
 
-OS8 lives at `/home/leo/Claude/os8`. The files a future agent will need to touch for the bridge:
+The files a future agent will need to touch for the OS8 bridge:
 
 - `src/services/backend-adapter.js` — add a `launcher` backend that calls the local HTTP API instead of spawning a CLI
 - `src/services/ai-registry.js` — read-only queries for providers, containers, models (no changes needed, just understand the interface)

@@ -104,6 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     server_parser.add_argument("--port", type=int, default=9000, help="Port for the dashboard (default: 9000)")
     server_parser.set_defaults(handler="server")
 
+    # --- doctor ---
+    doctor_parser = subparsers.add_parser("doctor", help="Run system diagnostics")
+    doctor_parser.set_defaults(handler="doctor")
+
     return parser
 
 
@@ -350,4 +354,10 @@ def main(repo_root: Path):
             os.execv(launcher_path, [launcher_path, *sys.argv[1:]])
             # execv replaces the process — never returns
         print("Dashboard stopped.")
+        return
+
+    # --- doctor ---
+    if handler == "doctor":
+        from src.doctor import run_doctor
+        run_doctor(repo_root)
         return

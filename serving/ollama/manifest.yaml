@@ -1,16 +1,29 @@
 name: ollama
 install_type: binary
-# Bundled locally under serving/ollama/. The jetpack6 CUDA plugin in
-# lib/ollama/cuda_jetpack6/ provides GB10/Blackwell acceleration.
 source: https://github.com/ollama/ollama/releases
 binary: serving/ollama/bin/ollama
+
+# Download the latest release tarball for the detected architecture.
+# $ARCH_DOCKER is injected by the launcher (arm64 or amd64).
+# The tarball extracts bin/ollama and lib/ollama/ (CUDA libs) into
+# serving/ollama/, matching the repo layout.
+install_cmd: |
+  set -e
+  VERSION=$(curl -sL https://api.github.com/repos/ollama/ollama/releases/latest \
+    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+  URL="https://github.com/ollama/ollama/releases/download/${VERSION}/ollama-linux-${ARCH_DOCKER}.tar.zst"
+  echo "Downloading ollama ${VERSION} for ${ARCH_DOCKER}..."
+  curl -fSL "$URL" -o /tmp/ollama.tar.zst
+  tar --zstd -xf /tmp/ollama.tar.zst -C serving/ollama/
+  rm /tmp/ollama.tar.zst
+  chmod +x serving/ollama/bin/ollama
+
 # Ollama manages its own model store under ~/.ollama.
 # Bind to all interfaces so containers (e.g. open-webui) can reach the daemon
 # via host.docker.internal -> 172.17.0.1 instead of just 127.0.0.1.
 env:
   OLLAMA_HOST: "0.0.0.0:11434"
 run: "{binary} serve"
-update: "download latest release tarball from github.com/ollama/ollama/releases"
 
 # Ollama doesn't expose /v1/models the same way; use its native version endpoint.
 health_path: /api/version

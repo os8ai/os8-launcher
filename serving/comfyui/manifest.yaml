@@ -1,6 +1,8 @@
 name: comfyui
 install_type: container
 image: howeszy/comfyui-arm64:0.3.65
+image_aarch64: howeszy/comfyui-arm64:0.3.65
+image_x86_64: yanwk/comfyui-boot:cu128-slim
 port: 8188
 
 # ComfyUI is a diffusion-model server *and* its own web UI — unlike the LLM

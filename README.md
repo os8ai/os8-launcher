@@ -1,11 +1,26 @@
 # os8-launcher
 
-A unified system for running local open-source AI models. See `VISION.md` for the full spec.
+A unified system for running local open-source AI models. Pick a model, a serving backend, and a client — the launcher wires them together, downloading weights if needed, starting the backend, and launching the client pointed at it.
+
+See [`VISION.md`](VISION.md) for the full architecture.
+
+## Prerequisites
+
+- **Linux** (Ubuntu 22.04+ recommended)
+- **NVIDIA GPU** with drivers installed
+- **CUDA 12.0+**
+- **Docker** with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+- **Python 3.10+**
+
+## Supported architectures
+
+- **x86_64** (amd64) — standard desktops and servers
+- **aarch64** (arm64) — NVIDIA DGX Spark, Jetson, Grace Hopper
 
 ## Install
 
 ```bash
-git clone git@github.com:os8ai/os8-launcher.git
+git clone https://github.com/os8ai/os8-launcher.git
 cd os8-launcher
 ./install
 ```
@@ -14,16 +29,41 @@ cd os8-launcher
 
 To remove: `./uninstall` (only removes the symlink if it points back at this repo).
 
-## Usage
+## Quick start
 
 ```bash
+# Verify your system meets the prerequisites
+os8-launcher doctor
+
+# Install backends and download a model
+os8-launcher setup --all
+os8-launcher download gemma-4-E2B-it
+
+# Start serving and open the dashboard
 os8-launcher
 ```
 
-This brings up the web dashboard at <http://localhost:9000>. Behavior:
+The dashboard runs at <http://localhost:9000>. From there you can pick a model, start a backend, and connect a client.
 
-- If the dashboard is already running, prints the URL and exits.
-- If something else is bound to port 9000, shows the holding PID and asks before killing it.
-- Otherwise starts the dashboard in the background (detached from your terminal, so closing the shell won't kill it). Logs go to `var/dashboard.log`.
+## Usage
 
-You can also run `./start` from inside the repo directory — `os8-launcher` is just a symlink to it.
+```bash
+os8-launcher             # Open the web dashboard
+os8-launcher doctor      # Run system diagnostics
+os8-launcher setup       # Install backends and clients
+os8-launcher serve       # Start a model backend from the CLI
+os8-launcher stop        # Stop the running backend
+os8-launcher status      # Show what's running
+```
+
+Run `os8-launcher --help` for the full command list.
+
+## How it works
+
+The launcher is manifest-driven. Each serving backend (`serving/<name>/manifest.yaml`) and client (`clients/<name>/manifest.yaml`) declares how to install, run, and update itself. To add a new backend or client, drop a directory with a `manifest.yaml` — in most cases no Python changes are needed.
+
+Models are configured in `config.yaml` with their source, format, compatible backends, and download size.
+
+## License
+
+MIT
