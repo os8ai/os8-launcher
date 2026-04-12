@@ -145,6 +145,36 @@ header .subtitle { font-size: 0.8rem; color: #888; }
   min-height: 40px;
   outline: none;
 }
+.voice-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #888;
+}
+.voice-filters {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.voice-filters select {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+}
+#voice-select {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+  min-width: 220px;
+}
 .audio-area {
   display: flex;
   flex-direction: column;
@@ -188,18 +218,21 @@ header .subtitle { font-size: 0.8rem; color: #888; }
 }
 .history-item button:hover { color: #e0e0e0; }
 .history-item .delete-btn:hover { color: #e94560; }
+.hidden { display: none !important; }
 </style>
 </head>
 <body>
 <header>
   <h1>os8 tts</h1>
-  <span class="subtitle">Fish Audio S2 Pro</span>
+  <span class="subtitle" id="subtitle">detecting backend...</span>
 </header>
 <div class="container">
   <div class="prompt-row">
     <textarea id="text" placeholder="Enter text to speak..." autofocus></textarea>
   </div>
-  <div class="tags-row">
+
+  <!-- Fish Speech: prosody tags -->
+  <div class="tags-row hidden" id="fish-tags">
     <button class="tag-btn" data-tag="[laughs]">[laughs]</button>
     <button class="tag-btn" data-tag="[whisper]">[whisper]</button>
     <button class="tag-btn" data-tag="[excited]">[excited]</button>
@@ -209,9 +242,41 @@ header .subtitle { font-size: 0.8rem; color: #888; }
     <button class="tag-btn" data-tag="[sighs]">[sighs]</button>
     <button class="tag-btn" data-tag="[pause]">...</button>
   </div>
+
+  <!-- Kokoro: voice picker with filters -->
+  <div class="voice-section hidden" id="kokoro-voice">
+    <div class="voice-filters">
+      <label>Language
+        <select id="voice-lang">
+          <option value="">All</option>
+          <option value="a">American English</option>
+          <option value="b">British English</option>
+          <option value="e">Spanish</option>
+          <option value="f">French</option>
+          <option value="h">Hindi</option>
+          <option value="i">Italian</option>
+          <option value="j">Japanese</option>
+          <option value="p">Portuguese</option>
+          <option value="z">Chinese</option>
+        </select>
+      </label>
+      <label>Gender
+        <select id="voice-gender">
+          <option value="">All</option>
+          <option value="f">Female</option>
+          <option value="m">Male</option>
+        </select>
+      </label>
+      <label>Voice
+        <select id="voice-select"><option value="">loading voices...</option></select>
+      </label>
+    </div>
+  </div>
+
   <div class="settings-row">
     <label>Speed <input type="range" id="speed" min="0.5" max="2.0" step="0.1" value="1.0"><span id="speed-val">1.0</span></label>
-    <label>Temp <input type="number" id="temperature" value="0.7" min="0.0" max="1.5" step="0.1"></label>
+    <!-- Fish Speech only -->
+    <label id="lbl-temp" class="hidden">Temp <input type="number" id="temperature" value="0.7" min="0.0" max="1.5" step="0.1"></label>
     <label>Format
       <select id="format">
         <option value="wav">WAV</option>
@@ -219,14 +284,17 @@ header .subtitle { font-size: 0.8rem; color: #888; }
         <option value="opus">Opus</option>
       </select>
     </label>
-    <label>Latency
+    <!-- Fish Speech only -->
+    <label id="lbl-latency" class="hidden">Latency
       <select id="latency">
         <option value="normal">Normal</option>
         <option value="balanced">Balanced (higher quality)</option>
       </select>
     </label>
   </div>
-  <details class="ref-section">
+
+  <!-- Fish Speech: voice cloning -->
+  <details class="ref-section hidden" id="fish-ref">
     <summary>Voice cloning (optional)</summary>
     <div class="ref-inner">
       <label>Reference audio (10-30s clip)</label>
@@ -235,6 +303,7 @@ header .subtitle { font-size: 0.8rem; color: #888; }
       <textarea id="ref-text" placeholder="Transcription of the reference audio..."></textarea>
     </div>
   </details>
+
   <button id="speak">Speak</button>
   <div id="status"></div>
   <div class="audio-area" id="audio-area">
@@ -243,7 +312,7 @@ header .subtitle { font-size: 0.8rem; color: #888; }
   <div class="history" id="history"></div>
 </div>
 <script>
-const API = `http://${location.hostname}:8080`;
+const DASHBOARD = `http://${location.hostname}:9000`;
 const statusEl = document.getElementById('status');
 const audioArea = document.getElementById('audio-area');
 const historyEl = document.getElementById('history');
@@ -251,10 +320,22 @@ const btn = document.getElementById('speak');
 const textInput = document.getElementById('text');
 const speedSlider = document.getElementById('speed');
 const speedVal = document.getElementById('speed-val');
+const subtitleEl = document.getElementById('subtitle');
+
+let backendType = null;  // 'fish-speech' or 'kokoro'
+let API = null;          // base URL for the TTS backend
+let allVoices = [];      // raw voice name list from Kokoro
+
+const LANG_MAP = {
+  a: 'American English', b: 'British English', e: 'Spanish',
+  f: 'French', h: 'Hindi', i: 'Italian',
+  j: 'Japanese', p: 'Portuguese', z: 'Chinese',
+};
+const GENDER_MAP = { f: 'Female', m: 'Male' };
 
 speedSlider.addEventListener('input', () => { speedVal.textContent = speedSlider.value; });
 
-// Insert prosody tags at cursor
+// Insert prosody tags at cursor (Fish Speech only)
 document.querySelectorAll('.tag-btn').forEach(b => {
   b.addEventListener('click', () => {
     const tag = b.dataset.tag;
@@ -271,6 +352,144 @@ function setStatus(msg, cls) {
   statusEl.textContent = msg;
   statusEl.className = cls || '';
 }
+
+function show(id) { document.getElementById(id).classList.remove('hidden'); }
+function hide(id) { document.getElementById(id).classList.add('hidden'); }
+
+// --- Backend detection via launcher API ---
+
+async function detectBackend() {
+  try {
+    const res = await fetch(`${DASHBOARD}/api/status`);
+    if (!res.ok) throw new Error('dashboard unreachable');
+    const data = await res.json();
+    if (!data.backend) throw new Error('no backend running');
+
+    const name = data.backend.name;
+    const port = data.backend.port;
+    API = `http://${location.hostname}:${port}`;
+
+    if (name === 'kokoro') {
+      backendType = 'kokoro';
+      subtitleEl.textContent = 'Kokoro';
+      setupKokoroUI();
+    } else if (name === 'fish-speech') {
+      backendType = 'fish-speech';
+      subtitleEl.textContent = 'Fish Audio S2 Pro';
+      setupFishUI();
+    } else {
+      throw new Error(`unknown TTS backend: ${name}`);
+    }
+  } catch (e) {
+    // Fallback: try probing known ports directly
+    await probeBackends();
+  }
+}
+
+async function probeBackends() {
+  // Try Kokoro first (lightweight, fast health check)
+  for (const [name, port, healthPath] of [
+    ['kokoro', 8880, '/v1/audio/voices'],
+    ['fish-speech', 8080, '/v1/health'],
+  ]) {
+    try {
+      const url = `http://${location.hostname}:${port}`;
+      const r = await fetch(`${url}${healthPath}`, { signal: AbortSignal.timeout(3000) });
+      if (r.ok) {
+        API = url;
+        backendType = name;
+        if (name === 'kokoro') {
+          subtitleEl.textContent = 'Kokoro';
+          setupKokoroUI();
+        } else {
+          subtitleEl.textContent = 'Fish Audio S2 Pro';
+          setupFishUI();
+        }
+        return;
+      }
+    } catch { /* try next */ }
+  }
+  setStatus('No TTS backend detected. Start one with: ./launcher serve kokoro-v1 --client tts', 'error');
+  subtitleEl.textContent = 'no backend';
+}
+
+// --- UI setup per backend ---
+
+function setupFishUI() {
+  show('fish-tags');
+  show('fish-ref');
+  show('lbl-temp');
+  show('lbl-latency');
+  hide('kokoro-voice');
+  setStatus('Connected to Fish Speech');
+}
+
+async function setupKokoroUI() {
+  hide('fish-tags');
+  hide('fish-ref');
+  hide('lbl-temp');
+  hide('lbl-latency');
+  show('kokoro-voice');
+  setStatus('Connected to Kokoro');
+  await loadVoices();
+}
+
+async function loadVoices() {
+  try {
+    const res = await fetch(`${API}/v1/audio/voices`);
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    const data = await res.json();
+    const voices = data.voices || data;
+    const voiceList = Array.isArray(voices) ? voices : Object.keys(voices);
+    allVoices = voiceList
+      .map(v => typeof v === 'string' ? v : (v.name || v.id || String(v)))
+      .filter(v => v.length >= 2)
+      .sort();
+  } catch (e) {
+    allVoices = ['af_bella'];
+    console.warn('Failed to load voices:', e);
+  }
+
+  // Wire up filter change events
+  document.getElementById('voice-lang').addEventListener('change', filterVoices);
+  document.getElementById('voice-gender').addEventListener('change', filterVoices);
+  filterVoices();
+}
+
+function filterVoices() {
+  const lang = document.getElementById('voice-lang').value;
+  const gender = document.getElementById('voice-gender').value;
+  const sel = document.getElementById('voice-select');
+  const prev = sel.value;
+
+  const filtered = allVoices.filter(v => {
+    // Skip legacy v0 voices unless no current-gen voices match
+    if (v.includes('_v0')) return false;
+    if (lang && v[0] !== lang) return false;
+    if (gender && v[1] !== gender) return false;
+    return true;
+  });
+
+  sel.innerHTML = '';
+  if (filtered.length === 0) {
+    sel.innerHTML = '<option value="">no voices match</option>';
+    return;
+  }
+  for (const name of filtered) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    // Show friendly label: "af_bella — American English, Female"
+    const langLabel = LANG_MAP[name[0]] || name[0];
+    const genderLabel = GENDER_MAP[name[1]] || name[1];
+    const displayName = name.replace(/^[a-z]{2}_/, '');
+    opt.textContent = `${displayName} — ${langLabel}, ${genderLabel}`;
+    sel.appendChild(opt);
+  }
+  // Restore previous selection if still in list, otherwise keep first
+  if (filtered.includes(prev)) sel.value = prev;
+}
+
+// --- Audio generation ---
 
 async function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -323,34 +542,51 @@ function addToHistory(url, text) {
 
 async function speak() {
   const text = textInput.value.trim();
-  if (!text) return;
+  if (!text || !backendType) return;
 
   btn.disabled = true;
   setStatus('Generating speech...', 'generating');
 
-  const body = {
-    text: text,
-    temperature: parseFloat(document.getElementById('temperature').value) || 0.7,
-    top_p: 0.9,
-    speed: parseFloat(speedSlider.value) || 1.0,
-    format: document.getElementById('format').value,
-    latency: document.getElementById('latency').value,
-  };
-
-  // Add voice clone reference if provided
-  const refFile = document.getElementById('ref-audio').files[0];
-  const refText = document.getElementById('ref-text').value.trim();
-  if (refFile) {
-    const audioBase64 = await fileToBase64(refFile);
-    body.references = [{ audio: audioBase64, text: refText }];
-  }
-
   try {
-    const res = await fetch(`${API}/v1/tts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    let res;
+
+    if (backendType === 'kokoro') {
+      const body = {
+        model: 'kokoro',
+        input: text,
+        voice: document.getElementById('voice-select').value || 'af_bella',
+        speed: parseFloat(speedSlider.value) || 1.0,
+        response_format: document.getElementById('format').value,
+      };
+      res = await fetch(`${API}/v1/audio/speech`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } else {
+      // Fish Speech
+      const body = {
+        text: text,
+        temperature: parseFloat(document.getElementById('temperature').value) || 0.7,
+        top_p: 0.9,
+        speed: parseFloat(speedSlider.value) || 1.0,
+        format: document.getElementById('format').value,
+        latency: document.getElementById('latency').value,
+      };
+
+      const refFile = document.getElementById('ref-audio').files[0];
+      const refText = document.getElementById('ref-text').value.trim();
+      if (refFile) {
+        const audioBase64 = await fileToBase64(refFile);
+        body.references = [{ audio: audioBase64, text: refText }];
+      }
+
+      res = await fetch(`${API}/v1/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    }
 
     if (!res.ok) {
       const err = await res.text();
@@ -374,13 +610,8 @@ textInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.ctrlKey && !btn.disabled) speak();
 });
 
-// Check backend connection on load
-fetch(`${API}/v1/health`)
-  .then(r => {
-    if (r.ok) setStatus('Connected to Fish Speech');
-    else throw new Error(`status ${r.status}`);
-  })
-  .catch(() => setStatus('Cannot reach Fish Speech at ' + API, 'error'));
+// Detect and connect on load
+detectBackend();
 </script>
 </body>
 </html>

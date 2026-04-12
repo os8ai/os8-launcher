@@ -148,6 +148,20 @@ models:
     backend_env: {}
     backend_args: ""
 
+  # --- text-to-speech: Kokoro v1, 82M params, 54 prebuilt voices, 8 languages ---
+  # Lightweight TTS with high-quality prebuilt voices.  Served via Kokoro-FastAPI
+  # (OpenAI-compatible /v1/audio/speech).  Models auto-download on first request.
+  kokoro-v1:
+    source: hexgrad/Kokoro-82M
+    path: models/kokoro-v1/weights
+    format: fp32
+    backends: [kokoro]
+    default_backend: kokoro
+    downloaded: false
+    size_gb: 0.3
+    backend_env: {}
+    backend_args: ""
+
   # --- text-to-speech: Fish Audio S2 Pro, Dual-AR 4.5B, 80+ languages ---
   # Zero-shot voice cloning from 10-30s reference audio.  Inline prosody
   # tags ([whisper], [excited], etc.) for fine-grained control.
@@ -181,6 +195,9 @@ backends:
   fish-speech:
     manifest: serving/fish-speech/manifest.yaml
     port: 8080
+  kokoro:
+    manifest: serving/kokoro/manifest.yaml
+    port: 8880
 
 clients:
   aider:

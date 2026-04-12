@@ -142,7 +142,11 @@ def download_model(
     elif download_type == "hf-snapshot":
         _download_huggingface(model, weights_path)
     elif download_type == "none":
-        print(f"Backend '{target_backend}' does not require a model download step.")
+        # Create the weights dir so _is_downloaded() returns True and the
+        # model appears in the dashboard launch controls.
+        weights_path.mkdir(parents=True, exist_ok=True)
+        (weights_path / ".ready").touch()
+        print(f"No download needed — {target_backend} fetches model weights automatically on first serve.")
     else:
         raise ModelError(
             f"Unknown download type '{download_type}' in manifest for '{target_backend}'."

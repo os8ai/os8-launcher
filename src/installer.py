@@ -339,26 +339,60 @@ def _update_binary(manifest: ManifestConfig, repo_root: Path):
 
 # --- public API ---
 
+INSTALLING_MARKER = ".installing"
+INSTALLED_MARKER = ".installed"
+
+
 def setup_tool(name: str, config: Config, repo_root: Path):
     """Install a tool (backend or client) from its manifest."""
     kind, manifest = _resolve_tool(name, config)
 
     print(f"Setting up {manifest.name} ({manifest.install_type})...")
 
-    match manifest.install_type:
-        case "pip":
-            _install_pip(manifest, repo_root)
-        case "container":
-            _install_container(manifest, config)
-        case "binary":
-            _install_binary(manifest, repo_root)
-        case "bridge":
-            print(f"  {manifest.name} is a bridge — nothing to install.")
-        case _:
-            raise InstallError(
-                f"Unknown install_type '{manifest.install_type}' "
-                f"in manifest for '{manifest.name}'."
-            )
+    # Write a marker so get_tool_status can report "installing" while the
+    # background task runs.  The marker lives inside the tool's own directory
+    # (venv for pip, manifest dir for others) and is removed on completion.
+    marker_dir = _marker_dir(manifest, repo_root)
+    if marker_dir:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / INSTALLING_MARKER).touch()
+        # Remove stale completion marker — a re-setup should prove success.
+        (marker_dir / INSTALLED_MARKER).unlink(missing_ok=True)
+
+    try:
+        match manifest.install_type:
+            case "pip":
+                _install_pip(manifest, repo_root)
+            case "container":
+                _install_container(manifest, config)
+            case "binary":
+                _install_binary(manifest, repo_root)
+            case "bridge":
+                print(f"  {manifest.name} is a bridge — nothing to install.")
+            case _:
+                raise InstallError(
+                    f"Unknown install_type '{manifest.install_type}' "
+                    f"in manifest for '{manifest.name}'."
+                )
+        # Mark successful completion.
+        if marker_dir:
+            (marker_dir / INSTALLED_MARKER).touch()
+    finally:
+        if marker_dir:
+            (marker_dir / INSTALLING_MARKER).unlink(missing_ok=True)
+
+
+def _marker_dir(manifest: ManifestConfig, repo_root: Path):
+    """Return the directory where install markers live for a tool.
+
+    Must NOT be inside the venv itself — creating the marker dir would
+    cause _install_pip to skip venv creation (``if not venv_path.exists()``).
+    We use the manifest's own directory (e.g. ``serving/kokoro/``) instead.
+    """
+    if not manifest.path:
+        return None
+    p = manifest.path.parent
+    return repo_root / p if not p.is_absolute() else p
 
 
 def setup_all(config: Config, repo_root: Path):
@@ -442,8 +476,10 @@ def get_tool_status(name: str, config: Config, repo_root: Path) -> str:
 
     match manifest.install_type:
         case "pip":
-            venv_rel = manifest.fields.get("venv")
-            if venv_rel and (repo_root / venv_rel).exists():
+            mdir = _marker_dir(manifest, repo_root)
+            if mdir and (mdir / INSTALLING_MARKER).exists():
+                return "installing"
+            if mdir and (mdir / INSTALLED_MARKER).exists():
                 return "installed"
             return "not installed"
         case "container":
@@ -473,8 +509,10 @@ def get_tool_status(name: str, config: Config, repo_root: Path) -> str:
             )
             return "installed" if result.returncode == 0 else "not installed"
         case "binary":
-            binary_rel = manifest.fields.get("binary")
-            if binary_rel and (repo_root / binary_rel).exists():
+            mdir = _marker_dir(manifest, repo_root)
+            if mdir and (mdir / INSTALLING_MARKER).exists():
+                return "installing"
+            if mdir and (mdir / INSTALLED_MARKER).exists():
                 return "installed"
             return "not installed"
         case _:

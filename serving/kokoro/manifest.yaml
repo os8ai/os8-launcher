@@ -1,0 +1,39 @@
+name: kokoro
+install_type: pip
+package: kokoro-fastapi
+venv: serving/kokoro/venv
+
+# Kokoro is an 82M-param TTS model with 54 pre-built voices across 8 languages.
+# We run it via Kokoro-FastAPI which provides an OpenAI-compatible /v1/audio/speech
+# endpoint.  On the Spark (aarch64) we install from pip with the cu130 PyTorch
+# index, same as Fish Speech — cu130 ships nvrtc that recognizes Blackwell sm_121.
+#
+# Models auto-download on first request (~300 MB).  No launcher-side weight
+# management needed — download.type is "none".
+
+install_cmd: |
+  set -e
+  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu130
+  if [ ! -d serving/kokoro/repo ]; then
+    git clone --depth 1 https://github.com/remsky/Kokoro-FastAPI.git serving/kokoro/repo
+  else
+    git -C serving/kokoro/repo pull --ff-only || true
+  fi
+  pip install serving/kokoro/repo
+  python serving/kokoro/repo/docker/scripts/download_model.py --output serving/kokoro/repo/api/src/models/v1_0
+
+health_path: /v1/audio/voices
+health_timeout: 180
+port: 8880
+
+env:
+  CUDA_CACHE_PATH: "{repo_root}/var/cache/cuda"
+  CUDA_CACHE_MAXSIZE: "4294967296"
+  MODEL_DIR: "{repo_root}/serving/kokoro/repo/api/src/models"
+  VOICES_DIR: "{repo_root}/serving/kokoro/repo/api/src/voices/v1_0"
+
+run: "python -m uvicorn api.src.main:app --host 0.0.0.0 --port {port}"
+cwd: serving/kokoro/repo
+
+download:
+  type: none

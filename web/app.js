@@ -630,9 +630,9 @@ function renderBackends(backends) {
     let html = '<table><tr><th>Name</th><th>Type</th><th>Status</th><th></th></tr>';
     for (const t of backends) {
         const statusClass = 'status-' + t.status.replace(' ', '-');
-        const actions = (t.status === 'not installed')
-            ? `<button class="btn btn-sm btn-primary" onclick="setupTool('${t.name}')">Setup</button>`
-            : '';
+        let actions = '';
+        if (t.status === 'not installed') actions = `<button class="btn btn-sm btn-primary" onclick="setupTool('${t.name}')">Setup</button>`;
+        else if (t.status === 'installing') actions = `<span class="muted">installing…</span>`;
         html += `<tr>
             <td>${t.name}</td>
             <td>${t.install_type}</td>
@@ -654,9 +654,9 @@ function renderClients(clients) {
     let html = '<table><tr><th>Name</th><th>Type</th><th>Status</th><th></th></tr>';
     for (const t of clients) {
         const statusClass = 'status-' + t.status.replace(' ', '-');
-        const actions = (t.status === 'not installed' )
-            ? `<button class="btn btn-sm btn-primary" onclick="setupTool('${t.name}')">Setup</button>`
-            : '';
+        let actions = '';
+        if (t.status === 'not installed') actions = `<button class="btn btn-sm btn-primary" onclick="setupTool('${t.name}')">Setup</button>`;
+        else if (t.status === 'installing') actions = `<span class="muted">installing…</span>`;
         html += `<tr>
             <td>${t.name}</td>
             <td>${t.install_type}</td>

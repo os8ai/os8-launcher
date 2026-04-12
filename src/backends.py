@@ -504,13 +504,13 @@ def _start_backend_inner(
         raise BackendError(f"Backend '{backend_name}' has no manifest.")
 
     # 3. Check model is downloaded. Backends that manage their own model store
-    #    (download.type: daemon-pull) or that download on first run from a
-    #    container (install_type: container) skip the on-disk check.
+    #    (download.type: daemon-pull / none) or that download on first run from
+    #    a container (install_type: container) skip the on-disk check.
     model_path = repo_root / model.path
     download_type = (manifest.fields.get("download") or {}).get("type")
     skip_disk_check = (
         manifest.install_type == "container"
-        or download_type == "daemon-pull"
+        or download_type in ("daemon-pull", "none")
     )
     if not skip_disk_check:
         if not _check_model_downloaded(model_path):

@@ -157,6 +157,7 @@ td {
 .status-healthy { color: #4ecca3; }
 .status-unhealthy { color: #e94560; }
 .status-installed { color: #4ecca3; }
+.status-installing { color: #f39c12; font-weight: 600; }
 .status-not-installed { color: #888; }
 .status-bridge { color: #5e7ce2; }
 
