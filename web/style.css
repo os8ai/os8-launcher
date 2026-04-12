@@ -30,11 +30,38 @@ header h1 {
 main {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto 1fr;
-    gap: 1px;
+    grid-template-rows: 1fr 1fr;
+    gap: 3px;
     background: #0f3460;
     height: calc(100vh - 52px);
+    position: relative;
 }
+
+/* Draggable divider handles */
+.divider {
+    position: absolute;
+    z-index: 10;
+    background: transparent;
+}
+.divider:hover, .divider.active {
+    background: #e94560;
+    transition: background 0.15s;
+}
+.divider-v {
+    width: 7px;
+    top: 0;
+    bottom: 0;
+    cursor: col-resize;
+    margin-left: -3px;
+}
+.divider-h {
+    height: 7px;
+    left: 0;
+    right: 0;
+    cursor: row-resize;
+    margin-top: -3px;
+}
+body.resizing { user-select: none; }
 
 .panel {
     background: #1a1a2e;
@@ -343,7 +370,8 @@ select {
 /* Responsive */
 @media (max-width: 800px) {
     main {
-        grid-template-columns: 1fr;
-        grid-template-rows: auto auto auto 1fr;
+        grid-template-columns: 1fr !important;
+        grid-template-rows: auto auto auto 1fr !important;
     }
+    .divider { display: none; }
 }

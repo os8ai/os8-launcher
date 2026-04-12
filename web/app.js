@@ -803,3 +803,86 @@ setInterval(pollModels, POLL_INTERVAL);
 setInterval(pollStatus, POLL_INTERVAL);
 setInterval(pollTools, POLL_INTERVAL * 3);  // tools change less frequently
 setInterval(pollLogs, POLL_INTERVAL);
+
+// --- Resizable dividers ---
+
+(function initDividers() {
+    const main = document.querySelector('main');
+    const divV = document.getElementById('divider-v');
+    const divH = document.getElementById('divider-h');
+    const STORAGE_KEY = 'os8-layout';
+
+    function loadLayout() {
+        try {
+            return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+        } catch (e) { return {}; }
+    }
+
+    function saveLayout(colPct, rowPct) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ col: colPct, row: rowPct }));
+    }
+
+    function applyLayout(colPct, rowPct) {
+        main.style.gridTemplateColumns = `${colPct}fr ${100 - colPct}fr`;
+        main.style.gridTemplateRows = `${rowPct}fr ${100 - rowPct}fr`;
+        positionHandles(colPct, rowPct);
+    }
+
+    function positionHandles(colPct, rowPct) {
+        divV.style.left = `${colPct}%`;
+        divH.style.top = `${rowPct}%`;
+    }
+
+    function clamp(val, min, max) { return Math.min(max, Math.max(min, val)); }
+
+    const saved = loadLayout();
+    let colPct = saved.col || 50;
+    let rowPct = saved.row || 50;
+    applyLayout(colPct, rowPct);
+
+    // Vertical divider drag
+    divV.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        divV.classList.add('active');
+        document.body.classList.add('resizing');
+        const rect = main.getBoundingClientRect();
+        function onMove(e) {
+            colPct = clamp(((e.clientX - rect.left) / rect.width) * 100, 15, 85);
+            applyLayout(colPct, rowPct);
+        }
+        function onUp() {
+            divV.classList.remove('active');
+            document.body.classList.remove('resizing');
+            saveLayout(colPct, rowPct);
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+
+    // Horizontal divider drag
+    divH.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        divH.classList.add('active');
+        document.body.classList.add('resizing');
+        const rect = main.getBoundingClientRect();
+        function onMove(e) {
+            rowPct = clamp(((e.clientY - rect.top) / rect.height) * 100, 15, 85);
+            applyLayout(colPct, rowPct);
+        }
+        function onUp() {
+            divH.classList.remove('active');
+            document.body.classList.remove('resizing');
+            saveLayout(colPct, rowPct);
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+
+    // Double-click to reset
+    divV.addEventListener('dblclick', () => { colPct = 50; applyLayout(colPct, rowPct); saveLayout(colPct, rowPct); });
+    divH.addEventListener('dblclick', () => { rowPct = 50; applyLayout(colPct, rowPct); saveLayout(colPct, rowPct); });
+})();
