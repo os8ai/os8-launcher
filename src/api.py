@@ -83,10 +83,23 @@ def startup():
     # Discover repo root from this file's location
     app.state.repo_root = Path(__file__).resolve().parent.parent
     app.state.config = load_config(app.state.repo_root)
+    # Track config.yaml mtime so _config() can hot-reload when the file
+    # changes (e.g. a new model entry added after the dashboard started).
+    # Without this, CLI edits to config.yaml don't appear until the
+    # dashboard process is restarted.
+    try:
+        app.state.config_mtime = (app.state.repo_root / "config.yaml").stat().st_mtime
+    except OSError:
+        app.state.config_mtime = 0.0
     # Per-process identity, used by /api/health so the dashboard can tell
     # the post-restart process apart from the pre-restart one (the gap
     # between socket close and rebind is too small to detect by polling).
     app.state.server_id = f"{os.getpid()}-{int(time.time() * 1000)}"
+
+
+# Guards the config-reload critical section against concurrent requests
+# (FastAPI dispatches sync handlers into a threadpool).
+_config_reload_lock = threading.Lock()
 
 
 @app.on_event("shutdown")
@@ -104,6 +117,33 @@ def shutdown():
 
 
 def _config():
+    """Return the current config, hot-reloading if config.yaml changed.
+
+    The dashboard originally loaded config.yaml once at startup, so adding a
+    new model required restarting the process. This checks the file's mtime
+    on every request and re-parses only when it has changed. A parse failure
+    (e.g. mid-edit YAML) logs a warning and returns the last-known-good
+    config — the next successful reload replaces it.
+    """
+    config_path = app.state.repo_root / "config.yaml"
+    try:
+        current_mtime = config_path.stat().st_mtime
+    except OSError:
+        return app.state.config
+    if current_mtime == app.state.config_mtime:
+        return app.state.config
+    with _config_reload_lock:
+        # Re-check inside the lock — another thread may have already reloaded.
+        if current_mtime == app.state.config_mtime:
+            return app.state.config
+        try:
+            app.state.config = load_config(app.state.repo_root)
+            print("  (config.yaml reloaded)", flush=True)
+        except (ConfigError, Exception) as e:
+            print(f"  (config reload failed, keeping last-known-good: {e})", flush=True)
+        # Record the mtime regardless of success so we don't retry on every
+        # request while the file is mid-edit with a syntax error.
+        app.state.config_mtime = current_mtime
     return app.state.config
 
 
