@@ -180,6 +180,19 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
     variables["backend_env_flags"] = env_flags
     variables["backend_args"] = model.backend_args or ""
 
+    # For GGUF models, resolve the weights dir to the canonical entry-point
+    # file. llama.cpp's -m flag needs a specific .gguf file (given the first
+    # shard, it auto-loads siblings); a directory won't work. Non-GGUF
+    # backends simply don't reference {model_file} in their run template.
+    weights_dir = repo_root / model.path
+    if weights_dir.exists():
+        ggufs = sorted(weights_dir.rglob("*.gguf"))
+        if ggufs:
+            first_shard = next(
+                (p for p in ggufs if "-00001-of-" in p.name), ggufs[0]
+            )
+            variables["model_file"] = str(first_shard)
+
     return variables
 
 

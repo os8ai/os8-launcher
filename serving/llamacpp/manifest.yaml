@@ -3,27 +3,37 @@ install_type: binary
 source: https://github.com/ggerganov/llama.cpp/releases
 binary: serving/llamacpp/bin/llama-server
 
-# Download the latest CUDA-enabled release for the detected architecture.
-# $ARCH is injected by the launcher (aarch64 or x86_64).
-# llama.cpp uses "arm64" / "x64" in its asset names.
+# Download the latest Vulkan-enabled release for the detected architecture.
+# $ARCH is injected by the launcher (aarch64 or x86_64). llama.cpp uses
+# "arm64" / "x64" in its asset names. We use the Vulkan build because it's
+# the only prebuilt path to GPU acceleration on aarch64 Linux (upstream does
+# not publish a CUDA-aarch64 binary) and Vulkan works on Blackwell / AMD /
+# Intel GPUs alike, so one asset covers both architectures.
+#
+# The release tarball is a bundle — llama-server is dynamically linked to
+# ~15 sibling .so files (libllama, libggml, libmtmd, libggml-vulkan, etc.),
+# so we copy the entire extracted folder into bin/, not just the binary.
 install_cmd: |
   set -e
   if [ "$ARCH" = "x86_64" ]; then LLAMA_ARCH="x64"; else LLAMA_ARCH="arm64"; fi
   TAG=$(curl -sL https://api.github.com/repos/ggerganov/llama.cpp/releases/latest \
     | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-  ASSET="llama-${TAG}-bin-ubuntu-${LLAMA_ARCH}.tar.gz"
+  ASSET="llama-${TAG}-bin-ubuntu-vulkan-${LLAMA_ARCH}.tar.gz"
   URL="https://github.com/ggerganov/llama.cpp/releases/download/${TAG}/${ASSET}"
-  echo "Downloading llama.cpp ${TAG} for ${LLAMA_ARCH}..."
+  echo "Downloading llama.cpp ${TAG} (Vulkan) for ${LLAMA_ARCH}..."
   curl -fSL "$URL" -o /tmp/llamacpp.tar.gz
-  mkdir -p serving/llamacpp/bin
-  tar xzf /tmp/llamacpp.tar.gz -C /tmp/llamacpp-extract --strip-components=1 2>/dev/null \
-    || (mkdir -p /tmp/llamacpp-extract && tar xzf /tmp/llamacpp.tar.gz -C /tmp/llamacpp-extract)
-  cp /tmp/llamacpp-extract/llama-server serving/llamacpp/bin/ \
-    || cp /tmp/llamacpp-extract/*/llama-server serving/llamacpp/bin/
+  # Wipe any prior install so stale libs from a previous backend variant
+  # (CPU-only, etc.) don't shadow the new ones at link time.
+  rm -rf serving/llamacpp/bin /tmp/llamacpp-extract
+  mkdir -p serving/llamacpp/bin /tmp/llamacpp-extract
+  tar xzf /tmp/llamacpp.tar.gz -C /tmp/llamacpp-extract
+  # Release tarballs put everything under a single `llama-<tag>/` subfolder;
+  # copy its contents (not the folder itself) into bin/.
+  cp -a /tmp/llamacpp-extract/llama-*/. serving/llamacpp/bin/
   chmod +x serving/llamacpp/bin/llama-server
   rm -rf /tmp/llamacpp.tar.gz /tmp/llamacpp-extract
 
-run: "{binary} -m {model_path} --port {port}"
+run: "{binary} -m {model_file} --host 0.0.0.0 --port {port} {backend_args}"
 
 # llama.cpp consumes GGUF files; download from HF (often gated).
 credentials:

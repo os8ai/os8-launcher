@@ -51,6 +51,23 @@ models:
     backend_env: {}
     backend_args: ""
 
+  # --- frontier MoE on llama.cpp: 230B total / 10B active, 3-bit dynamic GGUF ---
+  # Unsloth's UD-Q3_K_XL is ~101 GB and fits in 128 GB unified memory with
+  # headroom for KV cache. The repo contains every quant (~500 GB+), so
+  # allow_patterns scopes the download to just the UD-Q3_K_XL subfolder.
+  # See unsloth.ai/docs/models/minimax-m25 for the DGX Spark how-to.
+  minimax-m2.5-q3kxl:
+    source: unsloth/MiniMax-M2.5-GGUF
+    path: models/minimax-m2.5-q3kxl/weights
+    format: gguf
+    backends: [llamacpp]
+    default_backend: llamacpp
+    allow_patterns: ["UD-Q3_K_XL/*"]
+    downloaded: false
+    size_gb: 101
+    backend_env: {}
+    backend_args: "-c 16384 -fa on -ngl 999 --jinja"
+
   # --- advanced/optional: very large, slow cold-start, validated NIM path ---
   # Kept for the eventual end-to-end NIM validation but not the day-to-day target.
   nemotron-3-super-120b:
