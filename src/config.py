@@ -34,6 +34,15 @@ class ModelConfig:
     size_gb: float | None = None
     backend_env: dict[str, str] = field(default_factory=dict)
     backend_args: str = ""
+    allow_patterns: list[str] | None = None
+    # Additional HF repos to pull into the SAME weights dir as the main source.
+    # Each entry is {source: str, allow_patterns: list[str] | None}. Used when
+    # a ComfyUI-style model (e.g. Flux Kontext) needs pieces scattered across
+    # multiple repos — the Comfy-Org repack ships the transformer, the text
+    # encoders live in comfyanonymous/flux_text_encoders, and the VAE comes
+    # from the BFL repo. All three land in the one weights dir so the
+    # ComfyUI bind-mount sees them under a single model name.
+    extra_sources: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -129,6 +138,8 @@ def _parse_models(raw: dict) -> dict[str, ModelConfig]:
             size_gb=data.get("size_gb"),
             backend_env=data.get("backend_env") or {},
             backend_args=data.get("backend_args", ""),
+            allow_patterns=data.get("allow_patterns"),
+            extra_sources=data.get("extra_sources") or [],
         )
     return models
 

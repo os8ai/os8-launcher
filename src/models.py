@@ -320,12 +320,32 @@ def _download_huggingface(model: ModelConfig, weights_path: Path):
     marker = weights_path / DOWNLOADING_MARKER
     marker.touch()
 
-    try:
+    # Optional subfolder / glob filter — lets a model entry pull only one
+    # quant from a multi-quant HF repo (e.g. ["UD-Q3_K_XL/*"]). Forwarded
+    # verbatim to huggingface_hub's snapshot_download.
+    allow_patterns = model.allow_patterns or None
+
+    # Build the list of (repo_id, allow_patterns) pairs to download. The main
+    # source is always first; extra_sources are pulled afterwards into the
+    # same weights_path so a single model dir can aggregate pieces from
+    # multiple repos (e.g. Flux Kontext's transformer + text encoders + VAE).
+    sources: list[tuple[str, list[str] | None]] = [(model.source, allow_patterns)]
+    for extra in model.extra_sources:
+        extra_src = extra.get("source")
+        if not extra_src:
+            raise ModelError(
+                f"Model '{model.name}' has an extra_sources entry with no 'source' field."
+            )
+        sources.append((extra_src, extra.get("allow_patterns")))
+
+    def _pull(repo_id: str, patterns: list[str] | None):
+        nonlocal hf_token
         try:
             snapshot_download(
-                repo_id=model.source,
+                repo_id=repo_id,
                 local_dir=str(weights_path),
                 token=hf_token,
+                allow_patterns=patterns,
             )
         except Exception as e:
             error_msg = str(e)
@@ -335,19 +355,26 @@ def _download_huggingface(model: ModelConfig, weights_path: Path):
                     if hf_token:
                         print("Retrying with token...")
                         snapshot_download(
-                            repo_id=model.source,
+                            repo_id=repo_id,
                             local_dir=str(weights_path),
                             token=hf_token,
+                            allow_patterns=patterns,
                         )
-                        print(f"\n{model.name} downloaded successfully.")
                         return
                 raise ModelError(
-                    f"Access denied for {model.source}.\n"
+                    f"Access denied for {repo_id}.\n"
                     f"This model may be gated. Accept the license at:\n"
-                    f"  https://huggingface.co/{model.source}\n"
+                    f"  https://huggingface.co/{repo_id}\n"
                     f"Then set your HF_TOKEN environment variable."
                 )
-            raise ModelError(f"Download failed: {e}")
+            raise ModelError(f"Download failed for {repo_id}: {e}")
+
+    try:
+        for i, (repo_id, patterns) in enumerate(sources):
+            if len(sources) > 1:
+                label = "main source" if i == 0 else f"extra source {i}/{len(sources)-1}"
+                print(f"[{label}] Fetching {repo_id}" + (f"  ({patterns})" if patterns else ""))
+            _pull(repo_id, patterns)
     finally:
         if marker.exists():
             marker.unlink()

@@ -98,6 +98,39 @@ models:
     backend_env: {}
     backend_args: ""
 
+  # --- image editing: Flux.1 Kontext dev, reference-image-conditioned ---
+  # Unlike schnell/dev, Kontext takes a reference image alongside the text
+  # prompt and generates an edited/recomposed result that preserves identity,
+  # style, or layout from the reference.
+  #
+  # Kontext for ComfyUI needs pieces from three HF repos — the transformer
+  # (Comfy-Org's fp8 scaled repack, ComfyUI single-file format), the text
+  # encoders (comfyanonymous/flux_text_encoders), and the VAE (the BFL
+  # Kontext repo's top-level ae.safetensors). extra_sources drops all three
+  # into the same weights dir so the ComfyUI bind-mount sees them under one
+  # model name. The BFL repo is gated — accept the license at
+  # https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev before
+  # downloading. The other two are public.
+  #
+  # fp8 is chosen deliberately: Blackwell has fp8 tensor cores and BFL's
+  # scaled-fp8 is near-fp16 quality. No single-file fp16 Kontext exists.
+  flux1-kontext-dev:
+    source: Comfy-Org/flux1-kontext-dev_ComfyUI
+    path: models/flux1-kontext-dev/weights
+    format: safetensors
+    backends: [comfyui]
+    default_backend: comfyui
+    downloaded: false
+    size_gb: 18
+    allow_patterns: ["split_files/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors"]
+    extra_sources:
+      - source: comfyanonymous/flux_text_encoders
+        allow_patterns: ["clip_l.safetensors", "t5xxl_fp8_e4m3fn.safetensors"]
+      - source: black-forest-labs/FLUX.1-Kontext-dev
+        allow_patterns: ["ae.safetensors"]
+    backend_env: {}
+    backend_args: ""
+
   # --- text-to-speech: Fish Audio S2 Pro, Dual-AR 4.5B, 80+ languages ---
   # Zero-shot voice cloning from 10-30s reference audio.  Inline prosody
   # tags ([whisper], [excited], etc.) for fine-grained control.

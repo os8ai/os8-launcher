@@ -160,6 +160,45 @@ header .subtitle { font-size: 0.8rem; color: #888; }
 }
 .history-item:hover .delete-btn { opacity: 1; }
 .history-item .delete-btn:hover { background: #c0324a; }
+.reference-row {
+  display: none;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: #16213e;
+  border: 1px dashed #2a2a4a;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: #888;
+}
+.reference-row.visible { display: flex; }
+.reference-row label[for="ref-file"] {
+  cursor: pointer;
+  padding: 0.3rem 0.6rem;
+  background: #0f3460;
+  color: #e0e0e0;
+  border-radius: 4px;
+}
+.reference-row label[for="ref-file"]:hover { background: #1a4a8a; }
+#ref-file { display: none; }
+#ref-thumb {
+  max-width: 80px;
+  max-height: 60px;
+  border-radius: 4px;
+  border: 1px solid #2a2a4a;
+  display: none;
+}
+#ref-thumb.visible { display: block; }
+#ref-clear {
+  background: none;
+  border: none;
+  color: #e94560;
+  cursor: pointer;
+  font-size: 1.1rem;
+  padding: 0 0.25rem;
+  display: none;
+}
+#ref-clear.visible { display: inline; }
 </style>
 </head>
 <body>
@@ -171,6 +210,13 @@ header .subtitle { font-size: 0.8rem; color: #888; }
   <div class="prompt-row">
     <input type="text" id="prompt" placeholder="Describe the image you want to create..." autofocus>
     <button id="generate">Generate</button>
+  </div>
+  <div class="reference-row" id="reference-row">
+    <label for="ref-file">Upload reference</label>
+    <input type="file" id="ref-file" accept="image/png,image/jpeg,image/webp">
+    <img id="ref-thumb" alt="reference">
+    <span id="ref-name">No reference image loaded — Kontext needs one.</span>
+    <button id="ref-clear" title="Remove reference">x</button>
   </div>
   <div class="settings-row">
     <label>Width <input type="number" id="width" value="1024" step="64" min="256" max="2048"></label>
@@ -193,9 +239,14 @@ const COMFYUI = `http://${location.hostname}:8188`;
 let MODEL_NAME = 'flux1-schnell';
 let DEFAULT_STEPS = 4;
 
+// needsReference: Kontext is reference-image-conditioned — the UI must force
+// the user to upload an image before allowing generation, and the workflow
+// shape is fundamentally different (LoadImage + VAEEncode + ReferenceLatent
+// instead of a plain EmptySD3LatentImage).
 const MODEL_DEFAULTS = {
-  'flux1-schnell': { steps: 4 },
-  'flux1-dev':     { steps: 20 },
+  'flux1-schnell':     { steps: 4,  needsReference: false },
+  'flux1-dev':         { steps: 20, needsReference: false },
+  'flux1-kontext-dev': { steps: 28, needsReference: true },
 };
 
 async function detectModel() {
@@ -213,6 +264,108 @@ async function detectModel() {
       }
     }
   } catch (e) { /* use defaults */ }
+  // Show the reference-upload row when a reference-conditioned model is loaded.
+  const needsRef = MODEL_DEFAULTS[MODEL_NAME]?.needsReference;
+  document.getElementById('reference-row').classList.toggle('visible', !!needsRef);
+  // Width/Height are set by FluxKontextImageScale in Kontext mode — hide them.
+  document.querySelectorAll('.settings-row label').forEach(lbl => {
+    const text = lbl.textContent.trim();
+    if (needsRef && (text.startsWith('Width') || text.startsWith('Height'))) {
+      lbl.style.display = 'none';
+    } else {
+      lbl.style.display = '';
+    }
+  });
+  updateGenerateEnabled();
+}
+
+function updateGenerateEnabled() {
+  const needsRef = MODEL_DEFAULTS[MODEL_NAME]?.needsReference;
+  if (needsRef && !referenceFilename) {
+    btn.disabled = true;
+    btn.title = 'Upload a reference image first';
+  } else {
+    btn.disabled = false;
+    btn.title = '';
+  }
+}
+
+// Kontext needs three files from subpaths (Comfy-Org packaging layout).
+// Text encoders + VAE are dropped at the top of the weights dir by the
+// multi-source download, so they appear directly under flux1-kontext-dev/.
+const KONTEXT_PATHS = {
+  unet:  'flux1-kontext-dev/split_files/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors',
+  clipL: 'flux1-kontext-dev/clip_l.safetensors',
+  t5:    'flux1-kontext-dev/t5xxl_fp8_e4m3fn.safetensors',
+  vae:   'flux1-kontext-dev/ae.safetensors',
+};
+
+// Kontext workflow — reference-image-conditioned editing.
+// The graph differs from the schnell/dev one: LoadImage → FluxKontextImageScale
+// → VAEEncode → ReferenceLatent injects the reference into the positive
+// conditioning. KSampler starts from the reference latent with denoise=1.0.
+function buildKontextWorkflow(prompt, refFilename, steps, seed) {
+  return {
+    '1': {
+      class_type: 'UNETLoader',
+      inputs: { unet_name: KONTEXT_PATHS.unet, weight_dtype: 'default' }
+    },
+    '2': {
+      class_type: 'DualCLIPLoader',
+      inputs: { clip_name1: KONTEXT_PATHS.clipL, clip_name2: KONTEXT_PATHS.t5, type: 'flux' }
+    },
+    '3': {
+      class_type: 'VAELoader',
+      inputs: { vae_name: KONTEXT_PATHS.vae }
+    },
+    '4': {
+      class_type: 'CLIPTextEncodeFlux',
+      inputs: { clip: ['2', 0], clip_l: prompt, t5xxl: prompt, guidance: 2.5 }
+    },
+    '5': {
+      class_type: 'CLIPTextEncodeFlux',
+      inputs: { clip: ['2', 0], clip_l: '', t5xxl: '', guidance: 2.5 }
+    },
+    '10': {
+      class_type: 'LoadImage',
+      inputs: { image: refFilename }
+    },
+    '11': {
+      class_type: 'FluxKontextImageScale',
+      inputs: { image: ['10', 0] }
+    },
+    '12': {
+      class_type: 'VAEEncode',
+      inputs: { pixels: ['11', 0], vae: ['3', 0] }
+    },
+    '13': {
+      class_type: 'ReferenceLatent',
+      inputs: { conditioning: ['4', 0], latent: ['12', 0] }
+    },
+    '7': {
+      class_type: 'KSampler',
+      inputs: {
+        model: ['1', 0],
+        seed: seed >= 0 ? seed : Math.floor(Math.random() * 2**32),
+        steps,
+        cfg: 1.0,
+        sampler_name: 'euler',
+        scheduler: 'simple',
+        positive: ['13', 0],
+        negative: ['5', 0],
+        latent_image: ['12', 0],
+        denoise: 1.0
+      }
+    },
+    '8': {
+      class_type: 'VAEDecode',
+      inputs: { samples: ['7', 0], vae: ['3', 0] }
+    },
+    '9': {
+      class_type: 'SaveImage',
+      inputs: { images: ['8', 0], filename_prefix: 'FluxKontext' }
+    }
+  };
 }
 
 function buildWorkflow(prompt, width, height, steps, seed) {
@@ -285,6 +438,53 @@ const imageArea = document.getElementById('image-area');
 const historyEl = document.getElementById('history');
 const btn = document.getElementById('generate');
 const promptInput = document.getElementById('prompt');
+const refFileInput = document.getElementById('ref-file');
+const refThumb = document.getElementById('ref-thumb');
+const refName = document.getElementById('ref-name');
+const refClear = document.getElementById('ref-clear');
+
+// ComfyUI-side filename returned from /upload/image. Null until user uploads.
+let referenceFilename = null;
+
+async function uploadReference(file) {
+  const fd = new FormData();
+  fd.append('image', file);
+  fd.append('overwrite', 'true');
+  const res = await fetch(`${COMFYUI}/upload/image`, { method: 'POST', body: fd });
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+  const data = await res.json();
+  // ComfyUI returns { name, subfolder, type }. LoadImage wants "name" or
+  // "subfolder/name" when the upload went to a subfolder.
+  return data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
+}
+
+refFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  setStatus('Uploading reference...', 'generating');
+  try {
+    referenceFilename = await uploadReference(file);
+    refThumb.src = URL.createObjectURL(file);
+    refThumb.classList.add('visible');
+    refName.textContent = file.name;
+    refClear.classList.add('visible');
+    setStatus(`Reference ready: ${referenceFilename}`);
+    updateGenerateEnabled();
+  } catch (err) {
+    setStatus(`Reference upload failed: ${err.message}`, 'error');
+  }
+});
+
+refClear.addEventListener('click', () => {
+  referenceFilename = null;
+  refFileInput.value = '';
+  refThumb.classList.remove('visible');
+  refThumb.src = '';
+  refName.textContent = 'No reference image loaded — Kontext needs one.';
+  refClear.classList.remove('visible');
+  setStatus('');
+  updateGenerateEnabled();
+});
 
 function setStatus(msg, cls) {
   statusEl.textContent = msg;
@@ -346,12 +546,20 @@ async function generate() {
   const steps = parseInt(document.getElementById('steps').value) || 4;
   const seed = parseInt(document.getElementById('seed').value);
 
+  const needsRef = MODEL_DEFAULTS[MODEL_NAME]?.needsReference;
+  if (needsRef && !referenceFilename) {
+    setStatus('Upload a reference image before generating.', 'error');
+    return;
+  }
+
   btn.disabled = true;
   setStatus('Connecting...', 'generating');
   setProgress(0);
 
   const clientId = crypto.randomUUID().replace(/-/g, '');
-  const workflow = buildWorkflow(text, width, height, steps, seed);
+  const workflow = needsRef
+    ? buildKontextWorkflow(text, referenceFilename, steps, seed)
+    : buildWorkflow(text, width, height, steps, seed);
 
   // Open WebSocket for progress
   let ws;
