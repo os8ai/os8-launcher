@@ -1,6 +1,6 @@
 # os8-launcher
 
-A unified system for running local open-source AI models. Pick a model, a serving backend, and a client — the launcher wires them together, downloading weights if needed, starting the backend, and launching the client pointed at it.
+A unified system for running local open-source AI models, primarily designed and tested on the NVIDIA DGX Spark (Linux arm64). Pick a model, a serving backend, and a client — the launcher wires them together, downloading weights if needed, starting the backend, and launching the client pointed at it.
 
 See [`VISION.md`](VISION.md) for the full architecture.
 
