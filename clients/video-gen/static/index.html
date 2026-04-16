@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>os8 video-gen</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+header {
+  width: 100%;
+  padding: 0.75rem 1.5rem;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+header h1 { font-size: 1.1rem; color: #e94560; font-weight: 600; }
+header .subtitle { font-size: 0.8rem; color: #888; }
+.container {
+  width: 100%;
+  max-width: 900px;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  flex: 1;
+}
+.prompt-row {
+  display: flex;
+  gap: 0.5rem;
+}
+#prompt {
+  flex: 1;
+  padding: 0.6rem 0.75rem;
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  outline: none;
+  min-height: 2.4em;
+}
+#prompt:focus { border-color: #0f3460; }
+#prompt::placeholder { color: #555; }
+#generate {
+  padding: 0.6rem 1.5rem;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  white-space: nowrap;
+  align-self: flex-start;
+}
+#generate:hover { background: #1a4a8a; }
+#generate:disabled { opacity: 0.4; cursor: not-allowed; }
+.settings-row {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: #888;
+  flex-wrap: wrap;
+}
+.settings-row label { display: flex; align-items: center; gap: 0.3rem; }
+.settings-row input, .settings-row select {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+}
+.settings-row input { width: 70px; }
+.settings-row select { width: auto; }
+#status {
+  font-size: 0.8rem;
+  color: #888;
+  min-height: 1.2em;
+}
+#status.error { color: #e94560; }
+#status.generating { color: #f39c12; }
+.progress-bar {
+  height: 3px;
+  background: #2a2a4a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.progress-bar .fill {
+  height: 100%;
+  background: #e94560;
+  width: 0%;
+  transition: width 0.3s;
+}
+.video-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+}
+.video-area video {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: 8px;
+  border: 1px solid #2a2a4a;
+  background: #000;
+}
+.placeholder {
+  color: #444;
+  font-size: 0.9rem;
+  font-style: italic;
+}
+.history {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding: 0.25rem 0;
+}
+.history-item {
+  position: relative;
+  flex-shrink: 0;
+}
+.history-item video {
+  width: 96px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  opacity: 0.7;
+  background: #000;
+}
+.history-item:hover video { opacity: 1; }
+.history-item video.active { border-color: #e94560; opacity: 1; }
+.history-item .delete-btn {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #e94560;
+  color: #fff;
+  border: none;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  padding: 0;
+}
+.history-item:hover .delete-btn { opacity: 1; }
+.history-item .delete-btn:hover { background: #c0324a; }
+.eta-info {
+  font-size: 0.75rem;
+  color: #666;
+  margin-top: -0.5rem;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>os8 video-gen</h1>
+  <span class="subtitle">Wan 2.1 T2V-14B</span>
+</header>
+<div class="container">
+  <div class="prompt-row">
+    <textarea id="prompt" rows="2" placeholder="Describe the video you want to create..."></textarea>
+    <button id="generate">Generate</button>
+  </div>
+  <div class="settings-row">
+    <label>Resolution
+      <select id="resolution">
+        <option value="480" selected>480p (848x480)</option>
+        <option value="720">720p (1280x720)</option>
+      </select>
+    </label>
+    <label>Frames <input type="number" id="frames" value="81" step="8" min="5" max="257" title="81 frames = ~5s at 16fps"></label>
+    <label>Steps <input type="number" id="steps" value="30" min="1" max="100"></label>
+    <label>Guidance <input type="number" id="guidance" value="5.0" step="0.5" min="1" max="20"></label>
+    <label>Seed <input type="number" id="seed" value="-1" title="-1 = random"></label>
+  </div>
+  <div class="eta-info">81 frames at 480p ~ 10-20 min on DGX Spark</div>
+  <div class="progress-bar"><div class="fill" id="progress"></div></div>
+  <div id="status"></div>
+  <div class="video-area" id="video-area">
+    <span class="placeholder">Your generated video will appear here</span>
+  </div>
+  <div class="history" id="history"></div>
+</div>
+<script>
+const BACKEND = `http://${location.hostname}:9003`;
+
+const statusEl = document.getElementById('status');
+const progressEl = document.getElementById('progress');
+const videoArea = document.getElementById('video-area');
+const historyEl = document.getElementById('history');
+const btn = document.getElementById('generate');
+const promptInput = document.getElementById('prompt');
+
+function setStatus(msg, cls) {
+  statusEl.textContent = msg;
+  statusEl.className = cls || '';
+}
+
+function setProgress(pct) {
+  progressEl.style.width = pct + '%';
+}
+
+function showVideo(url) {
+  videoArea.innerHTML = `<video src="${url}" controls autoplay loop></video>`;
+}
+
+function addToHistory(url) {
+  const item = document.createElement('div');
+  item.className = 'history-item';
+
+  const vid = document.createElement('video');
+  vid.src = url;
+  vid.muted = true;
+  vid.preload = 'metadata';
+  vid.onclick = () => {
+    showVideo(url);
+    historyEl.querySelectorAll('video').forEach(v => v.classList.remove('active'));
+    vid.classList.add('active');
+  };
+
+  const del = document.createElement('button');
+  del.className = 'delete-btn';
+  del.textContent = 'x';
+  del.onclick = (e) => {
+    e.stopPropagation();
+    const wasActive = vid.classList.contains('active');
+    item.remove();
+    if (wasActive) {
+      const next = historyEl.querySelector('.history-item video');
+      if (next) {
+        next.classList.add('active');
+        showVideo(next.src);
+      } else {
+        videoArea.innerHTML = '<span class="placeholder">Your generated video will appear here</span>';
+      }
+    }
+  };
+
+  item.append(vid, del);
+
+  historyEl.querySelectorAll('video').forEach(v => v.classList.remove('active'));
+  vid.classList.add('active');
+  historyEl.prepend(item);
+}
+
+async function pollProgress(jobId) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const res = await fetch(`${BACKEND}/status`);
+      const data = await res.json();
+      if (data.status === 'idle' || data.id !== jobId) return 'lost';
+      if (data.status === 'done') return 'done';
+      if (data.status === 'error') return 'error';
+      if (data.total_steps > 0) {
+        const pct = (data.step / data.total_steps) * 100;
+        setProgress(pct);
+        setStatus(`Generating... step ${data.step}/${data.total_steps}`, 'generating');
+      }
+    } catch (e) {
+      // backend might be busy, keep polling
+    }
+  }
+}
+
+async function generate() {
+  const text = promptInput.value.trim();
+  if (!text) return;
+
+  const resSelect = document.getElementById('resolution').value;
+  const width = resSelect === '720' ? 1280 : 848;
+  const height = resSelect === '720' ? 720 : 480;
+  const num_frames = parseInt(document.getElementById('frames').value) || 81;
+  const num_inference_steps = parseInt(document.getElementById('steps').value) || 30;
+  const guidance_scale = parseFloat(document.getElementById('guidance').value) || 5.0;
+  const seed = parseInt(document.getElementById('seed').value);
+
+  btn.disabled = true;
+  setStatus('Submitting...', 'generating');
+  setProgress(0);
+
+  let jobId;
+  try {
+    const res = await fetch(`${BACKEND}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: text, num_frames, height, width, guidance_scale, num_inference_steps, seed })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || 'Request failed');
+    }
+    const data = await res.json();
+    jobId = data.id;
+    setStatus('Generating... step 0/?', 'generating');
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, 'error');
+    btn.disabled = false;
+    return;
+  }
+
+  const outcome = await pollProgress(jobId);
+
+  if (outcome === 'done') {
+    const videoUrl = `${BACKEND}/result/${jobId}`;
+    showVideo(videoUrl);
+    addToHistory(videoUrl);
+    setStatus('Done!');
+    setProgress(100);
+  } else if (outcome === 'error') {
+    setStatus('Generation failed — check backend logs', 'error');
+  } else {
+    setStatus('Lost track of job', 'error');
+  }
+
+  btn.disabled = false;
+}
+
+btn.addEventListener('click', generate);
+promptInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !btn.disabled) {
+    e.preventDefault();
+    generate();
+  }
+});
+
+// Check backend connection on load
+fetch(`${BACKEND}/health`)
+  .then(r => r.json())
+  .then(d => setStatus(`Connected to wan-video backend (${d.status})`))
+  .catch(() => setStatus('Cannot reach wan-video backend at ' + BACKEND, 'error'));
+</script>
+</body>
+</html>

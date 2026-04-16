@@ -148,6 +148,23 @@ models:
     backend_env: {}
     backend_args: ""
 
+  # --- text-to-video: Wan 2.1 T2V-14B, Apache 2.0, 14B diffusion transformer ---
+  # Top-tier open-source video generation.  The 14B model normally needs
+  # 65-80 GB VRAM — fits in the Spark's 128 GB unified memory in bf16 with
+  # headroom for intermediate tensors.  Served via a thin FastAPI wrapper
+  # around diffusers' WanPipeline.  Expect several minutes per 5s clip at
+  # 480p with the default 30 inference steps.
+  wan21-t2v-14b:
+    source: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    path: models/wan21-t2v-14b/weights
+    format: bf16
+    backends: [wan-video]
+    default_backend: wan-video
+    downloaded: false
+    size_gb: 69
+    backend_env: {}
+    backend_args: ""
+
   # --- text-to-speech: Kokoro v1, 82M params, 54 prebuilt voices, 8 languages ---
   # Lightweight TTS with high-quality prebuilt voices.  Served via Kokoro-FastAPI
   # (OpenAI-compatible /v1/audio/speech).  Models auto-download on first request.
@@ -195,6 +212,9 @@ backends:
   fish-speech:
     manifest: serving/fish-speech/manifest.yaml
     port: 8080
+  wan-video:
+    manifest: serving/wan-video/manifest.yaml
+    port: 9003
   kokoro:
     manifest: serving/kokoro/manifest.yaml
     port: 8880
@@ -210,6 +230,9 @@ clients:
   image-gen:
     manifest: clients/image-gen/manifest.yaml
     port: 9001
+  video-gen:
+    manifest: clients/video-gen/manifest.yaml
+    port: 9004
   tts:
     manifest: clients/tts/manifest.yaml
     port: 9002

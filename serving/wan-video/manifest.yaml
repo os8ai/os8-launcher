@@ -1,0 +1,47 @@
+name: wan-video
+install_type: pip
+package: wan-video
+venv: serving/wan-video/venv
+
+# Wan 2.1 T2V-14B is a 14-billion-parameter text-to-video diffusion model
+# (Alibaba, Apache 2.0).  We serve it via a thin FastAPI wrapper around
+# HuggingFace diffusers' WanPipeline.
+#
+# On the Spark (aarch64, 128 GB unified memory) the whole pipeline (~51 GB
+# in bf16) lives on GPU — see PYTORCH_CUDA_ALLOC_CONF below for the trick
+# that makes that fit.  The cu130 PyTorch index ships aarch64 wheels with
+# nvrtc that recognizes Blackwell sm_121.
+#
+# Video generation is bandwidth-bound at the Spark's 273 GB/s LPDDR5x —
+# expect several minutes per 5-second clip at 480p with the default 30
+# inference steps.  The server runs one job at a time and exposes a
+# /status endpoint for progress polling.
+
+install_cmd: |
+  set -e
+  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+  pip install diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn imageio[ffmpeg]
+
+health_path: /health
+health_timeout: 600
+port: 9003
+
+env:
+  CUDA_CACHE_PATH: "{repo_root}/var/cache/cuda"
+  CUDA_CACHE_MAXSIZE: "4294967296"
+  WAN_MODEL_PATH: "{model_path}"
+  # On the Spark's unified memory, the OS page cache counts against CUDA's
+  # "free memory" metric even though it's reclaimable.  expandable_segments
+  # makes PyTorch's allocator grow on demand, letting the kernel evict page
+  # cache as needed.  Without this, pipe.to("cuda") OOMs on a nominally 130 GB
+  # GPU after loading the model from disk (because the mmap'd safetensors are
+  # sitting in page cache and counted as used).
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+run: "{repo_root}/serving/wan-video/venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port {port} --app-dir {repo_root}/serving/wan-video"
+
+credentials:
+  - hf_token
+
+download:
+  type: hf-snapshot

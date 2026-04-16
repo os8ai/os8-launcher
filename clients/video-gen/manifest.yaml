@@ -1,0 +1,6 @@
+name: video-gen
+install_type: container
+image: python:3.12-alpine
+port: 9004
+run: "docker run -p {port}:8080 -v {repo_root}/clients/video-gen/static:/srv:ro {image} python3 -m http.server 8080 --directory /srv"
+update: "docker pull {image}"
