@@ -1,0 +1,46 @@
+name: fastwan-video
+install_type: pip
+package: fastwan-video
+venv: serving/fastwan-video/venv
+
+# FastWan2.2-TI2V-5B is a DMD-distilled variant of Wan 2.2 from Hao AI
+# Lab (UCSD) — denoises in 3 fixed timesteps instead of 30, so a 5s 480p
+# clip runs in tens of seconds instead of minutes.
+#
+# The checkpoint's model_index.json declares pipeline_class=WanDMDPipeline,
+# which lives in the `fastvideo` package.  We deliberately do NOT install
+# fastvideo: it pins torch to a CUDA build that lacks Blackwell sm_121
+# support, which would force a downgrade off our cu130 wheel.  Instead
+# server.py loads the components via stock diffusers' WanPipeline and
+# reimplements the 3-step DMD denoising loop directly (see the module
+# docstring there for the math).  The dependency set below is therefore
+# intentionally identical to wan-video — no fastvideo, no flash-attn.
+#
+# Kept as a sibling of wan-video (not a fork) so the two can pin different
+# diffusers/torch versions over time, and so they can run side-by-side on
+# different ports (9003 / 9005).
+
+install_cmd: |
+  set -e
+  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+  pip install diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn imageio[ffmpeg]
+
+health_path: /health
+health_timeout: 600
+port: 9005
+
+env:
+  CUDA_CACHE_PATH: "{repo_root}/var/cache/cuda"
+  CUDA_CACHE_MAXSIZE: "4294967296"
+  FASTWAN_MODEL_PATH: "{model_path}"
+  # Same unified-memory page-cache workaround as wan-video; see that
+  # manifest for the full rationale.
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+run: "{repo_root}/serving/fastwan-video/venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port {port} --app-dir {repo_root}/serving/fastwan-video"
+
+credentials:
+  - hf_token
+
+download:
+  type: hf-snapshot

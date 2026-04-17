@@ -24,7 +24,7 @@ from src.installer import (
     setup_tool, get_all_tools_status, InstallError,
 )
 from src.models import (
-    get_models_data, download_model, remove_model, ModelError,
+    get_models_data, download_model, remove_model, is_download_active, ModelError,
 )
 from src.projects import (
     list_projects, create_project, get_active_project,
@@ -271,7 +271,7 @@ def api_status():
 
 @app.get("/api/models")
 def api_models():
-    return get_models_data(_config(), _repo_root())
+    return get_models_data(_config(), _repo_root(), current_server_id=app.state.server_id)
 
 
 @app.get("/api/tools")
@@ -390,10 +390,16 @@ def api_model_download(name: str, req: DownloadRequest = None, background_tasks:
     except ConfigError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Guard against double-starts: the same endpoint handles Resume, which
+    # is safe against an interrupted download (marker present, no live
+    # task) but must not spawn a second task on top of a running one.
+    if is_download_active(name):
+        raise HTTPException(status_code=409, detail=f"A download for '{name}' is already in progress.")
+
     backend = req.backend if req else None
     background_tasks.add_task(
         _run_with_log_capture,
-        download_model, name, _config(), _repo_root(), backend,
+        download_model, name, _config(), _repo_root(), backend, app.state.server_id,
     )
     return {"status": "started"}
 

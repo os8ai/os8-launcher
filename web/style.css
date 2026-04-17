@@ -149,6 +149,7 @@ td {
 .status-downloaded { color: #4ecca3; }
 .status-not-downloaded { color: #888; }
 .status-downloading { color: #f39c12; font-weight: 600; }
+.status-interrupted { color: #e94560; font-weight: 600; }
 .muted { color: #888; font-style: italic; font-size: 0.85em; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; margin-right: 4px; font-weight: 600; cursor: help; }
 .badge-verified { background: rgba(78, 204, 163, 0.18); color: #4ecca3; border: 1px solid rgba(78, 204, 163, 0.5); }

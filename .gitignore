@@ -5,6 +5,14 @@ models/*/weights/
 serving/*/venv/
 clients/*/venv/
 
+# Install state markers — written by ./launcher install at runtime.
+# Committing these would make a fresh clone falsely report the backend
+# as installed (get_tool_status only checks for the file's presence).
+serving/*/.installed
+serving/*/.installing
+clients/*/.installed
+clients/*/.installing
+
 # Cloned upstream repos (installed at setup time)
 serving/*/repo/
 

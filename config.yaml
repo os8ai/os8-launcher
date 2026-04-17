@@ -165,6 +165,29 @@ models:
     backend_env: {}
     backend_args: ""
 
+  # --- text-to-video: FastWan 2.2 TI2V-5B, DMD-distilled, 3-step ---
+  # DMD-distilled variant of Wan 2.2 from Hao AI Lab — ~20-50x faster than
+  # Wan 2.1 at comparable quality.  Text-and-image to video; here we serve
+  # only the text path.  Served by the fastwan-video backend, which loads
+  # the components via stock diffusers' WanPipeline and runs a hand-rolled
+  # 3-step DMD denoising loop (we avoid the upstream `fastvideo` package
+  # because it pins torch off our Blackwell-ready cu130 wheel — see
+  # serving/fastwan-video/manifest.yaml).  Apache 2.0.
+  fastwan22-ti2v-5b:
+    source: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
+    path: models/fastwan22-ti2v-5b/weights
+    format: bf16
+    backends: [fastwan-video]
+    default_backend: fastwan-video
+    downloaded: false
+    # size_gb is an offline fallback — the launcher resolves live
+    # per-file sizes from HuggingFace at download/poll time. Matches
+    # actual 22.5 GB footprint (transformer 9.3 + text_encoder 10.6 +
+    # vae 2.6 + metadata).
+    size_gb: 23
+    backend_env: {}
+    backend_args: ""
+
   # --- text-to-speech: Kokoro v1, 82M params, 54 prebuilt voices, 8 languages ---
   # Lightweight TTS with high-quality prebuilt voices.  Served via Kokoro-FastAPI
   # (OpenAI-compatible /v1/audio/speech).  Models auto-download on first request.
@@ -215,6 +238,9 @@ backends:
   wan-video:
     manifest: serving/wan-video/manifest.yaml
     port: 9003
+  fastwan-video:
+    manifest: serving/fastwan-video/manifest.yaml
+    port: 9005
   kokoro:
     manifest: serving/kokoro/manifest.yaml
     port: 8880

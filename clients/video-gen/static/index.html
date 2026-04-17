@@ -175,7 +175,7 @@ header .subtitle { font-size: 0.8rem; color: #888; }
 <body>
 <header>
   <h1>os8 video-gen</h1>
-  <span class="subtitle">Wan 2.1 T2V-14B</span>
+  <span class="subtitle" id="subtitle">Detecting backend…</span>
 </header>
 <div class="container">
   <div class="prompt-row">
@@ -194,7 +194,7 @@ header .subtitle { font-size: 0.8rem; color: #888; }
     <label>Guidance <input type="number" id="guidance" value="5.0" step="0.5" min="1" max="20"></label>
     <label>Seed <input type="number" id="seed" value="-1" title="-1 = random"></label>
   </div>
-  <div class="eta-info">81 frames at 480p ~ 10-20 min on DGX Spark</div>
+  <div class="eta-info" id="eta-info">81 frames at 480p ~ 10-20 min on DGX Spark</div>
   <div class="progress-bar"><div class="fill" id="progress"></div></div>
   <div id="status"></div>
   <div class="video-area" id="video-area">
@@ -203,7 +203,19 @@ header .subtitle { font-size: 0.8rem; color: #888; }
   <div class="history" id="history"></div>
 </div>
 <script>
-const BACKEND = `http://${location.hostname}:9003`;
+// Resolved on load via detectBackend().  Kept mutable so the same video-gen
+// client works against whichever video backend the launcher has started.
+let BACKEND = null;
+let backendName = null;
+const DASHBOARD = `http://${location.hostname}:9000`;
+
+// Known video backends in priority order: native port, display name,
+// default/max step counts for the Steps input.  DMD-distilled models
+// need ~3 steps; the vanilla WanPipeline wants ~30.
+const VIDEO_BACKENDS = [
+  { name: 'fastwan-video', port: 9005, label: 'FastWan 2.2 TI2V-5B', stepsDefault: 3, stepsMax: 8, etaHint: '81 frames at 480p ~ 30-60s on DGX Spark' },
+  { name: 'wan-video',     port: 9003, label: 'Wan 2.1 T2V-14B',    stepsDefault: 30, stepsMax: 100, etaHint: '81 frames at 480p ~ 10-20 min on DGX Spark' },
+];
 
 const statusEl = document.getElementById('status');
 const progressEl = document.getElementById('progress');
@@ -211,6 +223,9 @@ const videoArea = document.getElementById('video-area');
 const historyEl = document.getElementById('history');
 const btn = document.getElementById('generate');
 const promptInput = document.getElementById('prompt');
+const subtitleEl = document.getElementById('subtitle');
+const etaInfoEl = document.getElementById('eta-info');
+const stepsInput = document.getElementById('steps');
 
 function setStatus(msg, cls) {
   statusEl.textContent = msg;
@@ -345,11 +360,61 @@ promptInput.addEventListener('keydown', (e) => {
   }
 });
 
-// Check backend connection on load
-fetch(`${BACKEND}/health`)
-  .then(r => r.json())
-  .then(d => setStatus(`Connected to wan-video backend (${d.status})`))
-  .catch(() => setStatus('Cannot reach wan-video backend at ' + BACKEND, 'error'));
+// --- Backend detection ---------------------------------------------------
+// Same dashboard-first / port-probe pattern used by the tts client, so the
+// single video-gen UI works for whichever video backend the launcher has
+// started (wan-video or fastwan-video).
+
+function applyBackend(entry) {
+  BACKEND = `http://${location.hostname}:${entry.port}`;
+  backendName = entry.name;
+  subtitleEl.textContent = entry.label;
+  stepsInput.value = entry.stepsDefault;
+  stepsInput.max = entry.stepsMax;
+  etaInfoEl.textContent = entry.etaHint;
+}
+
+async function detectBackend() {
+  btn.disabled = true;
+  setStatus('Detecting video backend…');
+
+  // 1. Ask the launcher dashboard which backend is active.
+  try {
+    const res = await fetch(`${DASHBOARD}/api/status`, { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.backend && data.backend.name) {
+        const entry = VIDEO_BACKENDS.find(b => b.name === data.backend.name);
+        if (entry) {
+          const port = data.backend.port || entry.port;
+          applyBackend({ ...entry, port });
+          setStatus(`Connected to ${entry.label}`);
+          btn.disabled = false;
+          return;
+        }
+      }
+    }
+  } catch (e) { /* fall through to probe */ }
+
+  // 2. Probe known video backend ports directly.
+  for (const entry of VIDEO_BACKENDS) {
+    try {
+      const url = `http://${location.hostname}:${entry.port}`;
+      const r = await fetch(`${url}/health`, { signal: AbortSignal.timeout(3000) });
+      if (r.ok) {
+        applyBackend(entry);
+        const d = await r.json().catch(() => ({ status: 'ok' }));
+        setStatus(`Connected to ${entry.label} (${d.status})`);
+        btn.disabled = false;
+        return;
+      }
+    } catch (e) { /* try next */ }
+  }
+
+  setStatus('No video backend reachable — start one from the dashboard.', 'error');
+}
+
+detectBackend();
 </script>
 </body>
 </html>

@@ -411,6 +411,23 @@ function renderModels(models) {
                 ? `${m.size_human} / ${m.expected_human}`
                 : m.size_human;
             actions = `<span class="muted">in progress…</span>`;
+        } else if (m.state === 'interrupted') {
+            // Partial download with a leftover marker — dashboard died
+            // mid-transfer, or the last attempt failed.  HF resumes skip
+            // already-complete files, so Resume just works.
+            statusClass = 'status-interrupted';
+            const errSuffix = m.last_error ? ` — ${escapeAttr(m.last_error).slice(0, 60)}` : '';
+            statusText = `interrupted${errSuffix}`;
+            sizeCell = m.expected_human
+                ? `${m.size_human} / ${m.expected_human} (partial)`
+                : `${m.size_human} (partial)`;
+            const titleAttr = m.last_error
+                ? ` title="Last error: ${escapeAttr(m.last_error)}"`
+                : '';
+            actions = `
+                <button class="btn btn-sm btn-primary" onclick="downloadModel('${m.name}')"${titleAttr}>Resume</button>
+                <button class="btn btn-sm btn-danger" onclick="removeModel('${m.name}')" title="Delete partial download">Discard</button>
+            `;
         } else if (m.state === 'downloaded') {
             statusClass = 'status-downloaded';
             statusText = 'downloaded';
