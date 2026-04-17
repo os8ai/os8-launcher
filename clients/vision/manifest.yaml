@@ -1,0 +1,11 @@
+name: vision
+install_type: container
+image: python:3.12-alpine
+port: 9006
+# Static HTML served via http.server.  The page fetches the served model
+# name from the running backend's /v1/models and POSTs chat completions
+# with image_url or video_url content parts (data: URIs for inline files).
+# CORS for the backend is enabled per-model via `--allowed-origins` in
+# backend_args so this page at port 9006 can talk to vLLM at port 8000.
+run: "docker run -p {port}:8080 -v {repo_root}/clients/vision/static:/srv:ro {image} python3 -m http.server 8080 --directory /srv"
+update: "docker pull {image}"

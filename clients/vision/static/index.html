@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>os8 vision</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+header {
+  width: 100%;
+  padding: 0.75rem 1.5rem;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+header h1 { font-size: 1.1rem; color: #e94560; font-weight: 600; }
+header .subtitle { font-size: 0.8rem; color: #888; }
+header .model { font-size: 0.8rem; color: #4a9eff; margin-left: auto; }
+.container {
+  width: 100%;
+  max-width: 900px;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  flex: 1;
+}
+.drop-zone {
+  border: 2px dashed #2a2a4a;
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+  cursor: pointer;
+  background: #16213e;
+  transition: border-color 0.15s;
+}
+.drop-zone:hover, .drop-zone.drag { border-color: #4a9eff; }
+.drop-zone input[type=file] { display: none; }
+.drop-zone .hint { color: #888; font-size: 0.85rem; margin-top: 0.3rem; }
+.preview {
+  max-width: 100%;
+  max-height: 280px;
+  border-radius: 6px;
+  display: block;
+  margin: 0 auto;
+}
+.preview-wrap {
+  background: #16213e;
+  padding: 0.75rem;
+  border-radius: 8px;
+  display: none;
+  position: relative;
+}
+.preview-wrap.visible { display: block; }
+.preview-wrap .meta {
+  font-size: 0.75rem;
+  color: #888;
+  text-align: center;
+  margin-top: 0.4rem;
+}
+.preview-wrap .clear {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: rgba(0,0,0,0.5);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+#prompt {
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  color: #e0e0e0;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  outline: none;
+  resize: vertical;
+  min-height: 4em;
+}
+#prompt:focus { border-color: #0f3460; }
+#prompt::placeholder { color: #555; }
+.settings-row {
+  display: flex;
+  gap: 1.5rem;
+  font-size: 0.82rem;
+  color: #aaa;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.settings-row label { display: flex; align-items: center; gap: 0.4rem; }
+.settings-row input[type=range] { width: 120px; }
+.settings-row .video-only { display: none; }
+.settings-row.has-video .video-only { display: flex; }
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+#ask {
+  padding: 0.6rem 1.5rem;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+#ask:hover { background: #1a4a8a; }
+#ask:disabled { opacity: 0.4; cursor: not-allowed; }
+.response {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  min-height: 3em;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-size: 0.93rem;
+  line-height: 1.5;
+  display: none;
+}
+.response.visible { display: block; }
+.response .thinking {
+  background: #0e1020;
+  border-left: 2px solid #4a9eff;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.8rem;
+  font-size: 0.82rem;
+  color: #8fa8d8;
+  border-radius: 4px;
+}
+.response .thinking summary {
+  cursor: pointer;
+  color: #4a9eff;
+  font-weight: 500;
+  margin-bottom: 0.4rem;
+  user-select: none;
+}
+.response .thinking[open] summary { margin-bottom: 0.5rem; }
+.status {
+  font-size: 0.82rem;
+  color: #888;
+  text-align: center;
+  margin-top: 0.4rem;
+  min-height: 1.2em;
+}
+.error { color: #e94560; }
+</style>
+</head>
+<body>
+<header>
+  <h1>os8 vision</h1>
+  <span class="subtitle">image + video &rarr; text</span>
+  <span class="model" id="model-name">connecting&hellip;</span>
+</header>
+<div class="container">
+  <label class="drop-zone" id="drop">
+    <input type="file" id="file" accept="image/*,video/*">
+    <div id="drop-msg"><strong>Drop an image or video here</strong><div class="hint">or click to choose &mdash; max ~20 MB (data-URI limit)</div></div>
+  </label>
+
+  <div class="preview-wrap" id="preview-wrap">
+    <button class="clear" id="clear" title="Remove">&times;</button>
+    <img class="preview" id="preview-img" style="display:none">
+    <video class="preview" id="preview-vid" controls style="display:none"></video>
+    <div class="meta" id="meta"></div>
+  </div>
+
+  <textarea id="prompt" placeholder="Ask about the file&hellip;"></textarea>
+
+  <div class="settings-row" id="settings">
+    <label><input type="checkbox" id="thinking" checked> reasoning mode</label>
+    <label class="video-only">fps <input type="range" id="fps" min="0.5" max="8" step="0.5" value="2"><span id="fps-val">2</span></label>
+  </div>
+
+  <div class="actions">
+    <button id="ask">Ask</button>
+  </div>
+
+  <div class="response" id="response"></div>
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+const BACKEND_HOST = window.location.hostname;
+const BACKEND_PORT = 8000;
+const BACKEND = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
+
+const els = {
+  drop: document.getElementById('drop'),
+  file: document.getElementById('file'),
+  dropMsg: document.getElementById('drop-msg'),
+  previewWrap: document.getElementById('preview-wrap'),
+  previewImg: document.getElementById('preview-img'),
+  previewVid: document.getElementById('preview-vid'),
+  meta: document.getElementById('meta'),
+  clear: document.getElementById('clear'),
+  prompt: document.getElementById('prompt'),
+  thinking: document.getElementById('thinking'),
+  fps: document.getElementById('fps'),
+  fpsVal: document.getElementById('fps-val'),
+  settings: document.getElementById('settings'),
+  ask: document.getElementById('ask'),
+  response: document.getElementById('response'),
+  status: document.getElementById('status'),
+  modelName: document.getElementById('model-name'),
+};
+
+let currentFile = null;
+let currentDataUrl = null;
+let modelId = null;
+
+async function discoverModel() {
+  try {
+    const r = await fetch(`${BACKEND}/v1/models`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    modelId = j.data && j.data[0] && j.data[0].id;
+    els.modelName.textContent = modelId || 'no model';
+  } catch (e) {
+    els.modelName.textContent = 'backend unreachable';
+    els.modelName.classList.add('error');
+    setStatus(`Could not reach backend at ${BACKEND}. Serve a model first.`, true);
+  }
+}
+
+function setStatus(msg, isError) {
+  els.status.textContent = msg || '';
+  els.status.classList.toggle('error', !!isError);
+}
+
+function humanSize(bytes) {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function onFile(file) {
+  if (!file) return;
+  if (file.size > 30 * 1024 * 1024) {
+    setStatus(`File is ${humanSize(file.size)} — may be too large for a data URI. Try a smaller clip.`, true);
+  } else {
+    setStatus('');
+  }
+  currentFile = file;
+  try {
+    currentDataUrl = await fileToDataUrl(file);
+  } catch (e) {
+    setStatus(`Could not read file: ${e.message}`, true);
+    return;
+  }
+
+  const isVideo = file.type.startsWith('video/');
+  els.previewImg.style.display = isVideo ? 'none' : 'block';
+  els.previewVid.style.display = isVideo ? 'block' : 'none';
+  if (isVideo) {
+    els.previewVid.src = currentDataUrl;
+  } else {
+    els.previewImg.src = currentDataUrl;
+  }
+  els.meta.textContent = `${file.name} · ${humanSize(file.size)} · ${file.type || 'unknown'}`;
+  els.previewWrap.classList.add('visible');
+  els.settings.classList.toggle('has-video', isVideo);
+}
+
+function clearFile() {
+  currentFile = null;
+  currentDataUrl = null;
+  els.previewImg.src = '';
+  els.previewVid.src = '';
+  els.previewWrap.classList.remove('visible');
+  els.settings.classList.remove('has-video');
+  els.file.value = '';
+}
+
+function renderBody(raw) {
+  // Pull any <think>...</think> block(s) into a collapsible section and
+  // render the rest as the body. Both open and closed <think> tags may
+  // appear mid-stream; treat them as state toggles.
+  let inThink = false;
+  let thinking = '';
+  let body = '';
+  let i = 0;
+  while (i < raw.length) {
+    if (!inThink && raw.startsWith('<think>', i)) {
+      inThink = true;
+      i += '<think>'.length;
+      continue;
+    }
+    if (inThink && raw.startsWith('</think>', i)) {
+      inThink = false;
+      i += '</think>'.length;
+      continue;
+    }
+    if (inThink) thinking += raw[i];
+    else body += raw[i];
+    i++;
+  }
+
+  const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let html = '';
+  if (thinking.trim()) {
+    html += `<details class="thinking" ${inThink ? 'open' : ''}><summary>Reasoning ${inThink ? '&hellip;' : ''}</summary>${escape(thinking.trim())}</details>`;
+  }
+  html += escape(body.trim());
+  return html;
+}
+
+async function ask() {
+  if (!modelId) {
+    setStatus('No model available. Serve qwen3-6-35b-a3b first.', true);
+    return;
+  }
+  if (!currentFile || !currentDataUrl) {
+    setStatus('Pick an image or video first.', true);
+    return;
+  }
+  const prompt = els.prompt.value.trim();
+  if (!prompt) {
+    setStatus('Enter a prompt.', true);
+    return;
+  }
+
+  const isVideo = currentFile.type.startsWith('video/');
+  const media = isVideo
+    ? { type: 'video_url', video_url: { url: currentDataUrl } }
+    : { type: 'image_url', image_url: { url: currentDataUrl } };
+
+  const body = {
+    model: modelId,
+    messages: [{ role: 'user', content: [media, { type: 'text', text: prompt }] }],
+    stream: true,
+    max_tokens: 4096,
+    extra_body: {
+      chat_template_kwargs: { enable_thinking: els.thinking.checked },
+    },
+  };
+  if (isVideo) {
+    body.extra_body.mm_processor_kwargs = {
+      fps: parseFloat(els.fps.value),
+      do_sample_frames: true,
+    };
+  }
+
+  els.ask.disabled = true;
+  setStatus('Generating&hellip;');
+  els.response.classList.add('visible');
+  els.response.innerHTML = '';
+
+  let full = '';
+  try {
+    const r = await fetch(`${BACKEND}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      throw new Error(`HTTP ${r.status}: ${err.slice(0, 300)}`);
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          const j = JSON.parse(payload);
+          const delta = j.choices && j.choices[0] && j.choices[0].delta;
+          if (delta && delta.content) {
+            full += delta.content;
+            els.response.innerHTML = renderBody(full);
+          }
+        } catch (e) { /* keep streaming */ }
+      }
+    }
+    setStatus('Done.');
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, true);
+  } finally {
+    els.ask.disabled = false;
+  }
+}
+
+// --- wire events ---
+els.file.addEventListener('change', e => onFile(e.target.files[0]));
+els.drop.addEventListener('dragover', e => { e.preventDefault(); els.drop.classList.add('drag'); });
+els.drop.addEventListener('dragleave', () => els.drop.classList.remove('drag'));
+els.drop.addEventListener('drop', e => {
+  e.preventDefault();
+  els.drop.classList.remove('drag');
+  onFile(e.dataTransfer.files[0]);
+});
+els.clear.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); clearFile(); });
+els.fps.addEventListener('input', () => { els.fpsVal.textContent = els.fps.value; });
+els.ask.addEventListener('click', ask);
+els.prompt.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask(); });
+
+discoverModel();
+</script>
+</body>
+</html>

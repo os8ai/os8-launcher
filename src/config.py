@@ -31,6 +31,11 @@ class ModelConfig:
     downloaded: bool
     nim_image: str | None = None
     ollama_tag: str | None = None
+    # Per-model vLLM image override. Set this when a model needs a different
+    # vLLM build than the manifest's default (e.g. a nightly that shipped a
+    # new model architecture or parser). Wired via the vllm manifest's
+    # download.image_field, which also gates the auto-pull at start time.
+    vllm_image: str | None = None
     size_gb: float | None = None
     backend_env: dict[str, str] = field(default_factory=dict)
     backend_args: str = ""
@@ -135,6 +140,7 @@ def _parse_models(raw: dict) -> dict[str, ModelConfig]:
             downloaded=data.get("downloaded", False),
             nim_image=data.get("nim_image"),
             ollama_tag=data.get("ollama_tag"),
+            vllm_image=data.get("vllm_image"),
             size_gb=data.get("size_gb"),
             backend_env=data.get("backend_env") or {},
             backend_args=data.get("backend_args", ""),

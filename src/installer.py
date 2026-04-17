@@ -198,9 +198,35 @@ def _install_container(manifest: ManifestConfig, config: Config):
             f"Manifest for '{manifest.name}' has no valid image to pull."
         )
 
-    print(f"  Pulling {image}...")
-    if not _run_command(["docker", "pull", image], "docker pull"):
-        raise InstallError(f"Failed to pull {image}.")
+    # Build any images declared in the manifest's image_builds block. These
+    # are local-only tags (e.g. os8-vllm:qwen36) that cannot be pulled from
+    # a registry. We build them all so `./launcher setup <backend>` leaves
+    # the system ready to serve any compatible model.
+    builds = manifest.fields.get("image_builds") or {}
+    if builds:
+        manifest_dir = Path(manifest.path).parent
+        for tag, info in builds.items():
+            dockerfile = info.get("dockerfile")
+            if not dockerfile:
+                raise InstallError(
+                    f"image_builds entry for {tag} missing 'dockerfile'."
+                )
+            dockerfile_path = manifest_dir / dockerfile
+            context = manifest_dir / (info.get("context") or ".")
+            if not dockerfile_path.exists():
+                raise InstallError(f"Dockerfile not found: {dockerfile_path}")
+            print(f"  Building {tag} from {dockerfile}...")
+            cmd = ["docker", "build", "-f", str(dockerfile_path),
+                   "-t", tag, str(context)]
+            if not _run_command(cmd, "docker build"):
+                raise InstallError(f"Failed to build {tag}.")
+
+    # If the default manifest image is in image_builds it's already handled.
+    # Otherwise pull it from the registry as before.
+    if image not in builds:
+        print(f"  Pulling {image}...")
+        if not _run_command(["docker", "pull", image], "docker pull"):
+            raise InstallError(f"Failed to pull {image}.")
 
     print(f"  {manifest.name} installed successfully.")
 

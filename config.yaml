@@ -188,6 +188,30 @@ models:
     backend_env: {}
     backend_args: ""
 
+  # --- multimodal MoE: Qwen3.6-35B-A3B, FP8, 35B total / 3B active, 65K ctx ---
+  # Reads text, images, and video (frame-sampled).  Writes text only — pair
+  # with Flux/Wan for generation.  Uses the official Qwen FP8 repo (half the
+  # footprint of BF16 and Blackwell has FP8 tensor cores).  The
+  # Qwen3_5MoeForConditionalGeneration arch is new (2026-04-15), so we build a
+  # parallel image `os8-vllm:qwen36` off a fresh cu130-nightly and route only
+  # this model to it via `vllm_image`.  Reasoning parser on by default (turn
+  # off per-request with `chat_template_kwargs.enable_thinking: false`).
+  # `qwen3_next_mtp` speculative + qwen3_coder tool parser both enabled.
+  # --allowed-origins lets the `vision` client (localhost:9006) reach this
+  # backend cross-origin.
+  # See serving/vllm/Dockerfile.qwen36 for the image recipe.
+  qwen3-6-35b-a3b:
+    source: Qwen/Qwen3.6-35B-A3B-FP8
+    path: models/qwen3-6-35b-a3b/weights
+    format: fp8
+    backends: [vllm]
+    default_backend: vllm
+    vllm_image: os8-vllm:qwen36
+    downloaded: false
+    size_gb: 36
+    backend_env: {}
+    backend_args: "--max-model-len 65536 --gpu-memory-utilization 0.80 --tensor-parallel-size 1 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --allowed-origins '[\"*\"]' --speculative-config '{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}'"
+
   # --- text-to-speech: Kokoro v1, 82M params, 54 prebuilt voices, 8 languages ---
   # Lightweight TTS with high-quality prebuilt voices.  Served via Kokoro-FastAPI
   # (OpenAI-compatible /v1/audio/speech).  Models auto-download on first request.
@@ -262,6 +286,9 @@ clients:
   tts:
     manifest: clients/tts/manifest.yaml
     port: 9002
+  vision:
+    manifest: clients/vision/manifest.yaml
+    port: 9006
   os8:
     type: bridge
     port: 8000

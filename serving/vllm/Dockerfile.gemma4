@@ -3,4 +3,8 @@
 # a Transformers release with Gemma 4 support.
 FROM vllm/vllm-openai:cu130-nightly
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# pandas: the cu130-nightly from 2026-04-16 imports pandas unconditionally
+# from vllm/_aiter_ops.py but doesn't ship it — vllm crashes at startup.
+# Remove once upstream either makes pandas a hard dep or drops the import.
+RUN pip install --no-cache-dir pandas
 RUN pip install --no-cache-dir -U "git+https://github.com/huggingface/transformers.git"

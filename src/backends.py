@@ -89,6 +89,7 @@ def _model_template_vars(model) -> dict:
         "format": model.format,
         "nim_image": model.nim_image or "",
         "ollama_tag": model.ollama_tag or "",
+        "vllm_image": model.vllm_image or "",
         # Generic alias used by post_start templates so manifests don't need
         # to know which specific tag field a backend uses.
         "model_tag": model.ollama_tag or model.name,
@@ -165,9 +166,15 @@ def _build_variables(model, backend, config, repo_root: Path) -> dict:
         if value:
             variables[cred_name] = value
 
-    # Container image from manifest (arch-aware: prefers image_{machine})
+    # Container image from manifest (arch-aware: prefers image_{machine}).
+    # If the manifest declares download.image_field, a per-model override of
+    # that name takes precedence — lets one model on vLLM run under a custom
+    # image (e.g. a nightly with a new arch) while other models keep the
+    # manifest default. The same hook gates auto-pull in start_backend().
     if backend.manifest and "image" in backend.manifest.fields:
-        variables["image"] = resolve_image(backend.manifest.fields)
+        image_field = (backend.manifest.fields.get("download") or {}).get("image_field")
+        per_model = getattr(model, image_field, None) if image_field else None
+        variables["image"] = per_model or resolve_image(backend.manifest.fields)
 
     # Binary-specific
     if backend.manifest and "binary" in backend.manifest.fields:
@@ -212,14 +219,55 @@ def _image_present(image: str) -> bool:
     return result.returncode == 0
 
 
-def _ensure_image_present(image: str, ngc_key: str | None = None):
-    """If the image isn't cached, log in (if needed) and pull it.
+def _build_local_image(image: str, build_info: dict, manifest, repo_root: Path):
+    """Build a local image from a Dockerfile declared in the manifest's
+    image_builds block. Paths in build_info are relative to the manifest dir.
+    """
+    dockerfile = build_info.get("dockerfile")
+    if not dockerfile:
+        raise BackendError(
+            f"image_builds entry for {image} missing 'dockerfile'."
+        )
+    manifest_dir = Path(manifest.path).parent
+    dockerfile_path = manifest_dir / dockerfile
+    context = manifest_dir / (build_info.get("context") or ".")
 
-    Streams progress to stdout so the user can see what's happening on a
-    multi-GB pull. No timeout — large NIM images can legitimately take 30+ min.
+    if not dockerfile_path.exists():
+        raise BackendError(f"Dockerfile not found: {dockerfile_path}")
+
+    print(f"Building image: {image}")
+    print(f"  Dockerfile: {dockerfile_path.relative_to(repo_root)}")
+    print(f"  Context:    {context.relative_to(repo_root)}")
+    print(f"This is a one-time build and may take several minutes.")
+    build = subprocess.run(
+        ["docker", "build", "-f", str(dockerfile_path), "-t", image, str(context)],
+    )
+    if build.returncode != 0:
+        raise BackendError(f"Failed to build image: {image}")
+    print(f"Image built successfully.")
+
+
+def _ensure_image_present(
+    image: str,
+    ngc_key: str | None = None,
+    manifest=None,
+    repo_root: Path | None = None,
+):
+    """If the image isn't cached, build it (if declared in the manifest's
+    image_builds) or pull it from the registry. Streams progress to stdout so
+    the user can see what's happening. No timeout — large NIM images can
+    legitimately take 30+ min.
     """
     if _image_present(image):
         return
+
+    # Prefer local build if the manifest declares one — avoids a confusing
+    # "Failed to pull" error for images that only exist as Dockerfiles in-tree.
+    if manifest and repo_root:
+        builds = (manifest.fields.get("image_builds") or {}) if manifest else {}
+        if image in builds:
+            _build_local_image(image, builds[image], manifest, repo_root)
+            return
 
     if "nvcr.io" in image:
         if not ngc_key:
@@ -244,7 +292,14 @@ def _ensure_image_present(image: str, ngc_key: str | None = None):
     print(f"This is a one-time download and may take a while.")
     pull = subprocess.run(["docker", "pull", image])
     if pull.returncode != 0:
-        raise BackendError(f"Failed to pull image: {image}")
+        hint = ""
+        if manifest and (manifest.fields.get("image_builds") or {}):
+            hint = (
+                f"\nIf {image} is a local build target, declare it in the "
+                f"backend manifest's image_builds: block so the launcher "
+                f"builds it instead of pulling."
+            )
+        raise BackendError(f"Failed to pull image: {image}{hint}")
     print(f"Image pulled successfully.")
 
 
@@ -579,7 +634,12 @@ def _start_backend_inner(
             image_to_check = resolve_image(manifest.fields) if manifest.fields else None
         if image_to_check:
             ngc_key_for_pull = get_ngc_key() if "nvcr.io" in image_to_check else None
-            _ensure_image_present(image_to_check, ngc_key=ngc_key_for_pull)
+            _ensure_image_present(
+                image_to_check,
+                ngc_key=ngc_key_for_pull,
+                manifest=manifest,
+                repo_root=repo_root,
+            )
         container_id = _start_container(cmd_string, backend_name)
         print(f"  Container started: {container_id[:12]}")
         # Stream the container's full logs to disk so the user (and the

@@ -5,10 +5,23 @@ port: 8000
 run: "docker run --gpus all --ipc=host -p {port}:8000 -v {model_path}:/model -v {repo_root}/var/cache/vllm:/root/.cache/vllm {backend_env_flags} {image} --model /model --served-model-name {model_name} --trust-remote-code {backend_args}"
 update: "docker pull vllm/vllm-openai:cu130-nightly"
 
+# Local images that the launcher should build (not pull) when missing.  Tag →
+# {dockerfile, context} — paths are relative to this manifest's directory.
+# Context defaults to "." (the manifest dir) when omitted.
+image_builds:
+  os8-vllm:gemma4:
+    dockerfile: Dockerfile.gemma4
+  os8-vllm:qwen36:
+    dockerfile: Dockerfile.qwen36
+
 # vLLM can pull gated models from HF on first serve; token is optional.
 credentials:
   - hf_token
 
 # Model weights come from a HuggingFace snapshot download.
+# `image_field` lets a model override the default image by setting its own
+# `vllm_image:` field — used when a new model arch needs a fresher nightly
+# than the shared default (e.g. qwen3-6-35b-a3b on os8-vllm:qwen36).
 download:
   type: hf-snapshot
+  image_field: vllm_image
