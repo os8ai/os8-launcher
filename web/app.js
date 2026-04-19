@@ -725,9 +725,10 @@ function renderLogs(lines) {
     }
 }
 
-// --- Settings / Credentials ---
+// --- Settings (API keys + ports) ---
 
 let credentialsData = { ngc: false, hf: false };
+let portsData = [];
 
 async function pollCredentials() {
     try {
@@ -735,15 +736,34 @@ async function pollCredentials() {
     } catch (e) { /* ignore */ }
 }
 
-function openSettings() {
+async function pollPorts() {
+    try {
+        portsData = await fetchJSON('/ports');
+    } catch (e) { /* ignore */ }
+}
+
+async function openSettings() {
     document.getElementById('settings-modal').style.display = 'flex';
     document.getElementById('ngc-key-input').value = '';
     document.getElementById('hf-token-input').value = '';
     updateCredentialStatus();
+    // Default to the keys tab each time the modal opens.
+    _selectSettingsTab('settings-keys');
+    await pollPorts();
+    renderPortsTable();
 }
 
 function closeSettings() {
     document.getElementById('settings-modal').style.display = 'none';
+}
+
+function _selectSettingsTab(id) {
+    document.querySelectorAll('#settings-tabs .tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.settingsTab === id);
+    });
+    document.querySelectorAll('#settings-modal .settings-tab-content').forEach(c => {
+        c.classList.toggle('active', c.id === id);
+    });
 }
 
 function updateCredentialStatus() {
@@ -767,32 +787,115 @@ function updateCredentialStatus() {
     }
 }
 
-async function saveCredentials() {
+function renderPortsTable() {
+    const wrap = document.getElementById('ports-table-wrap');
+    if (!wrap) return;
+    if (!portsData.length) {
+        wrap.innerHTML = '<span class="nothing-running">No configurable ports.</span>';
+        return;
+    }
+    let html = '<table class="ports-table"><tr><th>Service</th><th>Kind</th><th>Default</th><th>Port</th><th></th></tr>';
+    for (const p of portsData) {
+        const overrideHint = p.overridden ? ' title="Overridden from default"' : '';
+        const rowClass = p.overridden ? ' class="overridden"' : '';
+        const resetBtn = p.overridden
+            ? `<button class="btn btn-sm" onclick="resetPort('${p.name}')">Reset</button>`
+            : `<span class="muted">default</span>`;
+        html += `<tr${rowClass}${overrideHint}>
+            <td>${p.name}</td>
+            <td>${p.kind}</td>
+            <td class="muted">${p.default_port}</td>
+            <td><input type="number" min="1024" max="65535" class="port-input" data-port-name="${p.name}" value="${p.current_port}"></td>
+            <td>${resetBtn}</td>
+        </tr>`;
+    }
+    html += '</table>';
+    wrap.innerHTML = html;
+}
+
+async function resetPort(name) {
+    await fetch(API + '/ports/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+    });
+    await pollPorts();
+    renderPortsTable();
+}
+
+function _collectPortOverrides() {
+    // Build {name: port} only for rows whose input differs from the
+    // server's current value. Treating "equal to current" as a no-op keeps
+    // the batch small and lets the backend round-trip reset-on-default
+    // without us having to detect that case client-side.
+    const out = {};
+    const byName = {};
+    for (const p of portsData) byName[p.name] = p;
+    document.querySelectorAll('.port-input').forEach(input => {
+        const name = input.dataset.portName;
+        const raw = input.value.trim();
+        if (!raw) return;
+        const port = parseInt(raw, 10);
+        if (!Number.isFinite(port)) return;
+        const current = byName[name]?.current_port;
+        if (port !== current) out[name] = port;
+    });
+    return out;
+}
+
+async function saveSettings() {
     const ngcKey = document.getElementById('ngc-key-input').value.trim();
     const hfToken = document.getElementById('hf-token-input').value.trim();
+    const portOverrides = _collectPortOverrides();
 
-    const body = {};
-    if (ngcKey) body.ngc_api_key = ngcKey;
-    if (hfToken) body.hf_token = hfToken;
+    const credsBody = {};
+    if (ngcKey) credsBody.ngc_api_key = ngcKey;
+    if (hfToken) credsBody.hf_token = hfToken;
 
-    if (Object.keys(body).length === 0) {
-        closeSettings();
+    try {
+        if (Object.keys(credsBody).length > 0) {
+            const res = await fetch(API + '/credentials', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(credsBody),
+            });
+            credentialsData = await res.json();
+            updateCredentialStatus();
+        }
+        if (Object.keys(portOverrides).length > 0) {
+            const res = await fetch(API + '/ports', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ overrides: portOverrides }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert(`Couldn't save ports: ${err.detail || res.statusText}`);
+                return;
+            }
+            portsData = await res.json();
+            renderPortsTable();
+        }
+    } catch (e) {
+        alert(`Save failed: ${e.message || e}`);
         return;
     }
 
-    const res = await fetch(API + '/credentials', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    credentialsData = await res.json();
-    updateCredentialStatus();
     closeSettings();
 }
+
+// Keep the legacy name for anything calling it directly.
+const saveCredentials = saveSettings;
 
 // Close modal on backdrop click
 document.getElementById('settings-modal').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeSettings();
+});
+
+// Settings-modal tab switching (scoped so it doesn't conflict with the
+// main page's .tab handler below — see init).
+document.querySelectorAll('#settings-tabs .tab').forEach(tab => {
+    tab.addEventListener('click', () => _selectSettingsTab(tab.dataset.settingsTab));
 });
 
 // --- Init ---
@@ -800,10 +903,12 @@ document.getElementById('settings-modal').addEventListener('click', (e) => {
 document.getElementById('model-select').addEventListener('change', updateBackendSelect);
 document.getElementById('client-select').addEventListener('change', updateClientHint);
 
-// Tab switching
-document.querySelectorAll('.tab').forEach(tab => {
+// Tab switching — scoped to .tabs groups that use data-tab/.tab-content.
+// The settings modal uses its own data-settings-tab/.settings-tab-content
+// attributes so its handler (registered above) doesn't collide with this.
+document.querySelectorAll('.tabs:not(#settings-tabs) .tab').forEach(tab => {
     tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tabs:not(#settings-tabs) .tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(tab.dataset.tab).classList.add('active');

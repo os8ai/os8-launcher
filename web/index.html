@@ -14,34 +14,44 @@
         <button class="btn-settings" onclick="window.location='/projects.html'" title="Switch project">Projects</button>
         <button class="btn-settings" onclick="restartDashboard()" title="Restart this dashboard server">Restart</button>
         <button class="btn-settings" onclick="stopDashboard()" title="Stop this dashboard server">Stop server</button>
-        <button class="btn-settings" onclick="openSettings()" title="API Keys">Settings</button>
+        <button class="btn-settings" onclick="openSettings()" title="Settings">Settings</button>
     </header>
 
     <div id="settings-modal" class="modal" style="display:none">
-        <div class="modal-content">
+        <div class="modal-content modal-content-wide">
             <div class="modal-header">
-                <h2>API Keys</h2>
+                <h2>Settings</h2>
                 <button class="modal-close" onclick="closeSettings()">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="control-group">
-                    <label for="ngc-key-input">NVIDIA NGC API Key</label>
-                    <div class="key-row">
-                        <input type="password" id="ngc-key-input" placeholder="nvapi-...">
-                        <span id="ngc-status" class="key-status"></span>
-                    </div>
-                    <div class="key-help">Required for NIM containers. Get one at <a href="https://ngc.nvidia.com" target="_blank">ngc.nvidia.com</a></div>
+                <div class="tabs" id="settings-tabs">
+                    <button class="tab active" data-settings-tab="settings-keys">API Keys</button>
+                    <button class="tab" data-settings-tab="settings-ports">Ports</button>
                 </div>
-                <div class="control-group">
-                    <label for="hf-token-input">HuggingFace Token</label>
-                    <div class="key-row">
-                        <input type="password" id="hf-token-input" placeholder="hf_...">
-                        <span id="hf-status" class="key-status"></span>
+                <div id="settings-keys" class="settings-tab-content active">
+                    <div class="control-group">
+                        <label for="ngc-key-input">NVIDIA NGC API Key</label>
+                        <div class="key-row">
+                            <input type="password" id="ngc-key-input" placeholder="nvapi-...">
+                            <span id="ngc-status" class="key-status"></span>
+                        </div>
+                        <div class="key-help">Required for NIM containers. Get one at <a href="https://ngc.nvidia.com" target="_blank">ngc.nvidia.com</a></div>
                     </div>
-                    <div class="key-help">Required for gated models. Get one at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co</a></div>
+                    <div class="control-group">
+                        <label for="hf-token-input">HuggingFace Token</label>
+                        <div class="key-row">
+                            <input type="password" id="hf-token-input" placeholder="hf_...">
+                            <span id="hf-status" class="key-status"></span>
+                        </div>
+                        <div class="key-help">Required for gated models. Get one at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co</a></div>
+                    </div>
                 </div>
-                <div class="control-actions">
-                    <button class="btn btn-primary" onclick="saveCredentials()">Save</button>
+                <div id="settings-ports" class="settings-tab-content">
+                    <div class="key-help" style="margin-bottom:0.75rem">Ports used by each backend and client. Changes apply to the next start — already-running services keep their current port.</div>
+                    <div id="ports-table-wrap">Loading…</div>
+                </div>
+                <div class="control-actions" style="margin-top:1rem">
+                    <button class="btn btn-primary" onclick="saveSettings()">Save</button>
                     <button class="btn" onclick="closeSettings()">Cancel</button>
                 </div>
             </div>

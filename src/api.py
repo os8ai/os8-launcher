@@ -20,6 +20,7 @@ from src.backends import (
 from src.clients import start_client, stop_client, ClientError
 from src.runtime import serve_combo
 from src.credentials import get_ngc_key, set_ngc_key, get_hf_token, set_hf_token
+from src.settings import set_port_override, clear_port_override
 from src.installer import (
     setup_tool, get_all_tools_status, InstallError,
 )
@@ -186,6 +187,24 @@ class CredentialsRequest(BaseModel):
     hf_token: str | None = None
 
 
+class PortsSaveRequest(BaseModel):
+    overrides: dict[str, int]
+
+
+class PortsResetRequest(BaseModel):
+    name: str
+
+
+# Services whose listening port isn't actually governed by config.yaml — for
+# these, overriding the port in the Ports tab wouldn't change runtime behavior,
+# so hide them instead of showing a control that silently does nothing.
+#
+# ollama: the manifest's env hardcodes OLLAMA_HOST="0.0.0.0:11434" (binary
+# backends don't template-expand env, and the value is a literal). Changing
+# the config port would only break the health check.
+_PORTS_HIDDEN = {"ollama"}
+
+
 # --- Credentials endpoints ---
 
 @app.get("/api/credentials")
@@ -206,6 +225,97 @@ def api_credentials_set(req: CredentialsRequest):
         "ngc": bool(get_ngc_key()),
         "hf": bool(get_hf_token()),
     }
+
+
+# --- Ports endpoints ---
+
+def _ports_payload(config) -> list[dict]:
+    """List every overridable service with its default and current port."""
+    rows = []
+    for name, b in config.backends.items():
+        if name in _PORTS_HIDDEN:
+            continue
+        rows.append({
+            "name": name,
+            "kind": "backend",
+            "default_port": b.default_port or b.port,
+            "current_port": b.port,
+            "overridden": b.port != (b.default_port or b.port),
+        })
+    for name, c in config.clients.items():
+        # Bridge clients route to some other backend's port — overriding
+        # here wouldn't mean anything. Clients with no port declared (CLI
+        # clients like aider) also have nothing to configure.
+        if name in _PORTS_HIDDEN or c.type == "bridge" or c.port is None:
+            continue
+        rows.append({
+            "name": name,
+            "kind": "client",
+            "default_port": c.default_port or c.port,
+            "current_port": c.port,
+            "overridden": c.port != (c.default_port or c.port),
+        })
+    return rows
+
+
+def _apply_override_in_memory(config, name: str, port: int | None):
+    """Mirror a settings-file write into the live config.
+
+    `port=None` means "revert to default". Keeps the dashboard's in-memory
+    view consistent with settings.yaml without a full config reload.
+    """
+    if name in config.backends:
+        entry = config.backends[name]
+        entry.port = port if port is not None else (entry.default_port or entry.port)
+    elif name in config.clients:
+        entry = config.clients[name]
+        if entry.default_port is None:
+            return
+        entry.port = port if port is not None else entry.default_port
+
+
+@app.get("/api/ports")
+def api_ports():
+    return _ports_payload(_config())
+
+
+@app.post("/api/ports")
+def api_ports_set(req: PortsSaveRequest):
+    config = _config()
+    valid_names = {
+        n for n in list(config.backends.keys()) + list(config.clients.keys())
+        if n not in _PORTS_HIDDEN
+    }
+    # Validate the whole batch before writing anything, so a bad row doesn't
+    # leave settings.yaml half-updated.
+    for name, port in req.overrides.items():
+        if name not in valid_names:
+            raise HTTPException(status_code=400, detail=f"Unknown service: {name}")
+        if not isinstance(port, int) or port < 1024 or port > 65535:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Port for '{name}' must be an integer between 1024 and 65535 (got {port}).",
+            )
+    for name, port in req.overrides.items():
+        entry = config.backends.get(name) or config.clients.get(name)
+        default_port = getattr(entry, "default_port", None) or getattr(entry, "port", None)
+        if default_port is not None and port == default_port:
+            # User typed the default back in — treat as a reset so we don't
+            # leave a redundant row in settings.yaml.
+            clear_port_override(name)
+            _apply_override_in_memory(config, name, None)
+        else:
+            set_port_override(name, port)
+            _apply_override_in_memory(config, name, port)
+    return _ports_payload(config)
+
+
+@app.post("/api/ports/reset")
+def api_ports_reset(req: PortsResetRequest):
+    config = _config()
+    clear_port_override(req.name)
+    _apply_override_in_memory(config, req.name, None)
+    return _ports_payload(config)
 
 
 # --- Projects endpoints ---
@@ -267,6 +377,48 @@ def api_config():
 @app.get("/api/status")
 def api_status():
     return get_status_data()
+
+
+@app.get("/api/status/capabilities")
+def api_status_capabilities():
+    """Report which OS8 task types the currently-running backend can serve.
+
+    Phase-1 contract (OS8 Local Models plan, v1.1): derive capabilities from the
+    single running backend rather than the full eventual resident pool. The model
+    → task mapping lives in OS8; here we just surface {model, base_url, model_id}
+    per task the running model is eligible for. Returns {} when nothing is
+    serving.
+    """
+    data = get_status_data()
+    backend = data.get("backend")
+    if not backend:
+        return {}
+
+    model_name = backend.get("model")
+    port = backend.get("port")
+    if not model_name or not port:
+        return {}
+
+    base_url = f"http://localhost:{port}"
+    # vLLM runs with `--served-model-name {model_name}`, ollama uses the tag.
+    # For Phase 1 the model name from state matches what /v1/chat/completions
+    # expects as the `model` field. If that diverges later, resolve via the
+    # backend manifest's model_name_template.
+    entry = {
+        "model": model_name,
+        "base_url": base_url,
+        "model_id": model_name,
+    }
+
+    # Map known models to the OS8 task types they're eligible for (Phase 1).
+    # Anything not in this table contributes no capability entries — the OS8
+    # side will ignore unknown models rather than route tasks to them blindly.
+    eligibility = {
+        "gemma-4-31B-it-nvfp4": ["conversation", "summary", "planning"],
+        "gemma-4-E2B-it": ["conversation", "summary"],
+    }
+    tasks = eligibility.get(model_name, [])
+    return {task: entry for task in tasks}
 
 
 @app.get("/api/models")

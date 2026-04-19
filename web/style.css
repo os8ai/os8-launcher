@@ -302,6 +302,35 @@ select {
     max-width: 90vw;
 }
 
+.modal-content-wide {
+    width: 640px;
+}
+
+.modal-body .settings-tab-content { display: none; }
+.modal-body .settings-tab-content.active { display: block; }
+
+.ports-table {
+    width: 100%;
+}
+.ports-table td,
+.ports-table th {
+    padding: 0.3rem 0.5rem;
+}
+.ports-table tr.overridden td:first-child {
+    font-weight: 600;
+    color: #f39c12;
+}
+.ports-table .port-input {
+    width: 7em;
+    padding: 0.25rem 0.4rem;
+    background: #16213e;
+    border: 1px solid #2a2a4a;
+    color: #e0e0e0;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-family: monospace;
+}
+
 .modal-header {
     display: flex;
     align-items: center;

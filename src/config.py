@@ -57,6 +57,10 @@ class BackendConfig:
     port: int
     manifest_path: str
     manifest: ManifestConfig | None = None
+    # Port as declared in config.yaml, before any user override from
+    # ~/.config/os8-launcher/settings.yaml. Preserved so the Ports tab
+    # can show "reset to default" and display both values side-by-side.
+    default_port: int = 0
 
 
 @dataclass
@@ -67,6 +71,7 @@ class ClientConfig:
     port: int | None = None
     manifest_path: str | None = None
     manifest: ManifestConfig | None = None
+    default_port: int | None = None
 
 
 @dataclass
@@ -166,6 +171,7 @@ def _parse_backends(raw: dict, repo_root: Path) -> dict[str, BackendConfig]:
             port=port,
             manifest_path=manifest_path,
             manifest=manifest,
+            default_port=port,
         )
     return backends
 
@@ -182,6 +188,7 @@ def _parse_clients(raw: dict, repo_root: Path) -> dict[str, ClientConfig]:
                 name=name,
                 type="bridge",
                 port=port,
+                default_port=port,
             )
         else:
             manifest_path = data.get("manifest")
@@ -195,8 +202,30 @@ def _parse_clients(raw: dict, repo_root: Path) -> dict[str, ClientConfig]:
                 port=port,
                 manifest_path=manifest_path,
                 manifest=manifest,
+                default_port=port,
             )
     return clients
+
+
+def _apply_port_overrides(config: "Config"):
+    """Patch BackendConfig.port / ClientConfig.port from settings.yaml.
+
+    Overrides are keyed by the name used in config.yaml. `default_port` keeps
+    the value declared in config.yaml so callers (e.g. the /api/ports handler)
+    can show both. Unknown names in the override file are ignored — they may
+    belong to a backend/client removed from config.yaml.
+    """
+    from src.settings import get_port_overrides
+    overrides = get_port_overrides()
+    if not overrides:
+        return
+    for name, port in overrides.items():
+        if name in config.backends:
+            config.backends[name].port = port
+        elif name in config.clients and config.clients[name].default_port is not None:
+            # Only override clients that already had a port; bridge-only
+            # entries with no port aren't meaningful to rewrite here.
+            config.clients[name].port = port
 
 
 def _validate_cross_references(config: Config):
@@ -247,6 +276,7 @@ def load_config(repo_root: str | Path) -> Config:
 
     config = Config(models=models, backends=backends, clients=clients)
     _validate_cross_references(config)
+    _apply_port_overrides(config)
 
     return config
 
