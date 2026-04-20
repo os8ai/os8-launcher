@@ -108,12 +108,19 @@ def set_backend(
     container_id: str | None = None,
     health_path: str = "/v1/models",
     instance_id: str | None = None,
+    size_gb: float | None = None,
+    resident: bool = False,
 ):
     """Record a running backend in state.
 
     `name` is the backend kind (vllm, ollama, ...). `instance_id` is the
     multi-instance key under state["backends"]; defaults to the
     deterministic (backend, model) pair when omitted.
+
+    `size_gb` is the model's declared weights size — used by admission
+    accounting to decide whether to evict siblings for a new start.
+    `resident` marks an instance as pinned by config.yaml's `resident:`
+    list — these are never picked as LRU eviction victims.
     """
     instance_id = instance_id or compute_instance_id(name, model)
     data = load_state()
@@ -127,6 +134,8 @@ def set_backend(
         "container_id": container_id,
         "install_type": install_type,
         "health_path": health_path,
+        "size_gb": size_gb,
+        "resident": resident,
         "start_time": datetime.now().isoformat(),
     }
     save_state(data)

@@ -66,7 +66,16 @@ from src.verification import record_success, record_failure
 
 
 class BackendError(Exception):
-    """Raised when a backend operation fails."""
+    """Raised when a backend operation fails.
+
+    `code` is an optional machine-readable tag (e.g. BUDGET_EXCEEDED,
+    START_FAILED) that API handlers surface to callers so OS8 can show
+    differentiated toasts without parsing the human-readable message.
+    """
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 # Coarse guard around the "check state + kick off start" critical section
@@ -580,11 +589,16 @@ def start_backend(
     backend_name: str | None,
     config: Config,
     repo_root: Path,
+    resident: bool = False,
 ):
-    """Start a serving backend for the given model."""
+    """Start a serving backend for the given model.
+
+    `resident=True` persists a flag on the state entry so the instance
+    is exempt from LRU eviction. Used by the resident-set auto-start.
+    """
     log_start("backend", f"{backend_name or '?'} for {model_name}")
     try:
-        _start_backend_inner(model_name, backend_name, config, repo_root)
+        _start_backend_inner(model_name, backend_name, config, repo_root, resident=resident)
     except Exception as e:
         log_fail("backend", model_name, e)
         raise
@@ -596,6 +610,7 @@ def _start_backend_inner(
     backend_name: str | None,
     config: Config,
     repo_root: Path,
+    resident: bool = False,
 ):
     # 1. Resolve model and backend
     model = config.get_model(model_name)
@@ -782,6 +797,8 @@ def _start_backend_inner(
         container_id=container_id,
         health_path=health_path,
         instance_id=instance_id,
+        size_gb=model.size_gb,
+        resident=resident,
     )
 
     # 9. Post-start hook (optional) — runs before the health check.
@@ -972,11 +989,75 @@ def _check_health(port: int, health_path: str = "/v1/models") -> str:
         return "unhealthy"
 
 
-# Instances whose start has been scheduled but hasn't yet called
+# Instances whose start has been scheduled but haven't yet called
 # set_backend — guards against two concurrent ensures both kicking off a
-# start because neither has persisted state yet. Entries are added under
-# _ensure_lock and removed by the wrapper around start_backend.
-_starting_instances: set[str] = set()
+# start because neither has persisted state yet. Keyed by instance_id;
+# value is the declared model.size_gb so admission accounting can count
+# pending starts against the budget without waiting for set_backend.
+_starting_instances: dict[str, float] = {}
+
+
+def _reserved_gb(state_data: dict, kv_margin: float) -> float:
+    """Sum (size_gb + kv_margin) over every running AND pending instance."""
+    total = 0.0
+    for entry in (state_data.get("backends") or {}).values():
+        total += float(entry.get("size_gb") or 0) + kv_margin
+    for size in _starting_instances.values():
+        total += float(size) + kv_margin
+    return total
+
+
+def _admit_or_evict(
+    instance_id: str,
+    new_size_gb: float,
+    resources,
+) -> list[str]:
+    """Run under _ensure_lock. Evict LRU non-resident instances until
+    the new instance fits, or raise BUDGET_EXCEEDED. Returns the list
+    of evicted instance_ids (empty if the admission fit without
+    eviction) — the caller can surface it to the user.
+
+    Candidates for eviction: running non-resident instances that aren't
+    already mid-stop. A pending `_starting_instances` entry is never
+    evicted (nothing to stop yet) and contributes its size to the
+    reserved total.
+    """
+    budget = resources.memory_budget_gb
+    kv_margin = resources.kv_margin_gb
+    needed = new_size_gb + kv_margin
+    evicted: list[str] = []
+
+    while True:
+        state = validate_state()
+        reserved = _reserved_gb(state, kv_margin)
+        if reserved + needed <= budget:
+            return evicted
+
+        running = state.get("backends") or {}
+        # Eviction candidate set: running + non-resident + not the target.
+        # (A pending start for `instance_id` isn't in running yet, so the
+        # target is implicitly excluded.)
+        candidates = {
+            k: v for k, v in running.items()
+            if not v.get("resident") and k != instance_id
+        }
+        if not candidates:
+            raise BackendError(
+                f"Budget exceeded: would reserve {reserved + needed:.1f} GB but "
+                f"limit is {budget:.1f} GB, and all running instances are "
+                f"resident-pinned (nothing to evict).",
+                code="BUDGET_EXCEEDED",
+            )
+
+        # LRU: oldest last_used (fall back to start_time).
+        def _lru_key(k: str) -> str:
+            v = candidates[k]
+            return v.get("last_used") or v.get("start_time") or ""
+
+        victim = min(candidates.keys(), key=_lru_key)
+        print(f"  LRU eviction: stopping {victim} to make room for {instance_id}")
+        stop_backend(instance_id=victim)
+        evicted.append(victim)
 
 
 def ensure_backend(
@@ -986,24 +1067,32 @@ def ensure_backend(
     repo_root: Path,
     wait: bool = False,
     schedule_start: "callable | None" = None,
+    resident: bool = False,
 ) -> dict:
     """Make sure the (backend, model) instance is running. Idempotent.
 
     Return shape:
         {"status": "ready"|"loading",
          "instance_id": ..., "port": int|None, "base_url": str|None,
-         "model": ..., "backend": ...}
+         "model": ..., "backend": ..., "evicted": [instance_id, ...]}
 
     `ready` means a state entry exists AND its health endpoint responds
     200. `loading` means either a state entry exists but isn't yet
-    healthy, or a start has just been scheduled and state hasn't been
-    written.
+    healthy, or a start has just been scheduled.
 
-    With `wait=True`, runs the start synchronously and returns once
-    healthy (or raises BackendError on failure / timeout). With
-    `wait=False` (default), schedules the start via `schedule_start` —
-    caller passes FastAPI's background_tasks.add_task (wrapped in
-    _run_with_log_capture) or any other `callable(fn, *args)` sink.
+    Before scheduling/starting, runs admission against
+    config.resources.memory_budget_gb. When over budget, evicts LRU
+    non-resident siblings (via stop_backend) until the new instance
+    fits. Raises BackendError(code=BUDGET_EXCEEDED) when the resident
+    set already exceeds the budget and no eviction candidates remain.
+
+    `resident=True` marks the state entry as pinned — auto-start uses
+    this so user-driven ensures never accidentally promote a model to
+    permanent resident.
+
+    With `wait=True`, runs the start synchronously. With `wait=False`
+    (default), schedules via `schedule_start` (typically FastAPI's
+    background_tasks.add_task wrapped in _run_with_log_capture).
     """
     # Resolve up front so we fail fast on bad input, before any lock.
     model = config.get_model(model_name)
@@ -1015,6 +1104,9 @@ def ensure_backend(
         )
     backend = config.get_backend(resolved_backend)
     instance_id = compute_instance_id(resolved_backend, model_name)
+    size_gb = float(model.size_gb or 0)
+
+    evicted: list[str] = []
 
     with _ensure_lock:
         state = validate_state()
@@ -1031,6 +1123,7 @@ def ensure_backend(
                 "base_url": f"http://localhost:{port}" if port else None,
                 "model": model_name,
                 "backend": resolved_backend,
+                "evicted": [],
             }
 
         if instance_id in _starting_instances:
@@ -1042,48 +1135,42 @@ def ensure_backend(
                 "base_url": None,
                 "model": model_name,
                 "backend": resolved_backend,
+                "evicted": [],
             }
+
+        # Admission: evict LRU non-residents until we fit, or raise.
+        evicted = _admit_or_evict(instance_id, size_gb, config.resources)
 
         if not wait:
             if schedule_start is None:
                 raise BackendError(
                     "ensure_backend with wait=False requires schedule_start."
                 )
-            _starting_instances.add(instance_id)
+            _starting_instances[instance_id] = size_gb
 
     # Released lock — actual start runs here (sync if wait=True, else
     # dispatched via schedule_start).
     def _run_and_unmark():
         try:
-            start_backend(model_name, resolved_backend, config, repo_root)
+            start_backend(
+                model_name, resolved_backend, config, repo_root,
+                resident=resident,
+            )
         finally:
             with _ensure_lock:
-                _starting_instances.discard(instance_id)
+                _starting_instances.pop(instance_id, None)
 
     if wait:
-        # Synchronous. Re-check under the lock to catch a concurrent
-        # ensure that just flipped to 'ready' while we were waiting.
         with _ensure_lock:
-            state = validate_state()
-            existing = (state.get("backends") or {}).get(instance_id)
-            if existing:
-                port = existing.get("port")
-                hp = existing.get("health_path") or "/v1/models"
-                if _check_health(port, hp) == "healthy":
-                    return {
-                        "status": "ready",
-                        "instance_id": instance_id,
-                        "port": port,
-                        "base_url": f"http://localhost:{port}",
-                        "model": model_name,
-                        "backend": resolved_backend,
-                    }
-            _starting_instances.add(instance_id)
+            _starting_instances[instance_id] = size_gb
         try:
-            start_backend(model_name, resolved_backend, config, repo_root)
+            start_backend(
+                model_name, resolved_backend, config, repo_root,
+                resident=resident,
+            )
         finally:
             with _ensure_lock:
-                _starting_instances.discard(instance_id)
+                _starting_instances.pop(instance_id, None)
         state = validate_state()
         entry = (state.get("backends") or {}).get(instance_id)
         if not entry:
@@ -1098,10 +1185,10 @@ def ensure_backend(
             "base_url": f"http://localhost:{port}",
             "model": model_name,
             "backend": resolved_backend,
+            "evicted": evicted,
         }
 
     # wait=False: schedule the start and return 'loading' immediately.
-    # _starting_instances already set under the lock above.
     schedule_start(_run_and_unmark)
     return {
         "status": "loading",
@@ -1110,6 +1197,7 @@ def ensure_backend(
         "base_url": None,
         "model": model_name,
         "backend": resolved_backend,
+        "evicted": evicted,
     }
 
 

@@ -75,11 +75,42 @@ class ClientConfig:
 
 
 @dataclass
+class ResourcesConfig:
+    """Soft-cap resource accounting for the Phase-2 resident pool.
+
+    `memory_budget_gb` is the admission ceiling for sum(size_gb + kv_margin)
+    across all running backends. On unified-memory hardware like DGX Spark
+    this is a self-imposed policy, not a hardware limit — the OS will
+    happily oversubscribe past it. 100 GB on a 128 GB Spark leaves 28 GB
+    for the kernel and other processes.
+
+    `kv_margin_gb` is a flat per-instance reservation for KV cache +
+    launcher/docker overhead that model.size_gb doesn't capture.
+    """
+    memory_budget_gb: float = 100.0
+    kv_margin_gb: float = 10.0
+    auto_start_resident: bool = True
+    auto_start_parallel: bool = False
+
+
+@dataclass
+class RoleConfig:
+    """A named role (chat, coder, tts, …) and the (model, backend) it
+    resolves to. The `resident:` list references role names, so swapping
+    the model for a role doesn't require editing `resident:` too."""
+    model: str
+    backend: str | None = None
+
+
+@dataclass
 class Config:
     """Root configuration object."""
     models: dict[str, ModelConfig]
     backends: dict[str, BackendConfig]
     clients: dict[str, ClientConfig]
+    resources: ResourcesConfig = field(default_factory=ResourcesConfig)
+    resident: list[str] = field(default_factory=list)
+    roles: dict[str, RoleConfig] = field(default_factory=dict)
 
     def get_model(self, name: str) -> ModelConfig:
         if name not in self.models:
@@ -274,11 +305,44 @@ def load_config(repo_root: str | Path) -> Config:
     backends = _parse_backends(raw["backends"], repo_root)
     clients = _parse_clients(raw["clients"], repo_root)
 
-    config = Config(models=models, backends=backends, clients=clients)
+    resources = _parse_resources(raw.get("resources") or {})
+    resident = list(raw.get("resident") or [])
+    roles = _parse_roles(raw.get("roles") or {})
+
+    config = Config(
+        models=models, backends=backends, clients=clients,
+        resources=resources, resident=resident, roles=roles,
+    )
     _validate_cross_references(config)
     _apply_port_overrides(config)
 
     return config
+
+
+def _parse_resources(raw: dict) -> ResourcesConfig:
+    """Parse the optional `resources:` section. Missing keys fall back
+    to ResourcesConfig defaults so pre-Phase-2 config.yaml stays valid."""
+    defaults = ResourcesConfig()
+    return ResourcesConfig(
+        memory_budget_gb=float(raw.get("memory_budget_gb", defaults.memory_budget_gb)),
+        kv_margin_gb=float(raw.get("kv_margin_gb", defaults.kv_margin_gb)),
+        auto_start_resident=bool(raw.get("auto_start_resident", defaults.auto_start_resident)),
+        auto_start_parallel=bool(raw.get("auto_start_parallel", defaults.auto_start_parallel)),
+    )
+
+
+def _parse_roles(raw: dict) -> dict[str, RoleConfig]:
+    """Parse the optional `roles:` section. Missing is fine — resident:
+    entries for unknown roles are silently skipped at auto-start."""
+    out: dict[str, RoleConfig] = {}
+    for name, data in raw.items():
+        if not isinstance(data, dict):
+            continue
+        model = data.get("model")
+        if not model:
+            continue
+        out[name] = RoleConfig(model=model, backend=data.get("backend"))
+    return out
 
 
 def config_to_dict(config: Config) -> dict:

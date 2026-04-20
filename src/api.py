@@ -8,6 +8,10 @@ import threading
 import time
 from pathlib import Path
 
+# ensure_backend / BackendError imported below, but used in the startup
+# resident-autostart helper that is defined next to `startup()`. The
+# function refers to them by closure — they're resolved at call time.
+
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -97,6 +101,69 @@ def startup():
     # the post-restart process apart from the pre-restart one (the gap
     # between socket close and rebind is too small to detect by polling).
     app.state.server_id = f"{os.getpid()}-{int(time.time() * 1000)}"
+
+    # Kick off the resident set on a background thread so uvicorn's
+    # startup isn't held up by model loads (a 32 GB vLLM image can take
+    # minutes to warm up). Serial by default — concurrent cold reads
+    # starve NVMe and tip health timeouts.
+    if app.state.config.resources.auto_start_resident and app.state.config.resident:
+        threading.Thread(
+            target=_auto_start_resident_set,
+            args=(app.state.config, app.state.repo_root),
+            daemon=True,
+            name="resident-autostart",
+        ).start()
+
+
+def _auto_start_resident_set(config, repo_root: Path):
+    """Walk config.resident and ensure each role is up.
+
+    Runs off the uvicorn startup path, so a slow or failing model doesn't
+    block the API from coming online. Serial by default; config.resources.
+    auto_start_parallel flips to concurrent (starts via threads). Sorted
+    biggest-first so the largest claim on the budget goes through before
+    smaller siblings eat up headroom.
+    """
+    roles = config.resident
+    role_map = config.roles
+    unknown = [r for r in roles if r not in role_map]
+    if unknown:
+        print(f"  (resident auto-start: unknown roles skipped: {unknown})")
+
+    targets = []
+    for role in roles:
+        rc = role_map.get(role)
+        if not rc:
+            continue
+        try:
+            model = config.get_model(rc.model)
+        except ConfigError as e:
+            print(f"  (resident auto-start: role '{role}' → unknown model '{rc.model}': {e})")
+            continue
+        targets.append((role, rc, float(model.size_gb or 0)))
+    targets.sort(key=lambda t: t[2], reverse=True)  # biggest first
+
+    def _run(role: str, rc):
+        print(f"  (resident auto-start: bringing up {role} → {rc.model})")
+        try:
+            ensure_backend(
+                rc.model, rc.backend, config, repo_root,
+                wait=True, resident=True,
+            )
+        except BackendError as e:
+            print(f"  (resident auto-start: {role} failed: {e})")
+
+    if config.resources.auto_start_parallel:
+        threads = []
+        for role, rc, _ in targets:
+            t = threading.Thread(target=_run, args=(role, rc), daemon=True)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+    else:
+        for role, rc, _ in targets:
+            _run(role, rc)
 
 
 # Guards the config-reload critical section against concurrent requests
@@ -487,9 +554,12 @@ def api_serve_ensure(req: ServeEnsureRequest, background_tasks: BackgroundTasks)
             schedule_start=_schedule,
         )
     except BackendError as e:
-        # Shape the error so OS8 can distinguish class-level problems
-        # from transient start failures.
-        raise HTTPException(status_code=500, detail={"code": "START_FAILED", "message": str(e)})
+        # Map the error code to an HTTP status so OS8 can branch on it:
+        # 409 for admission-side rejections (budget), 500 for transient
+        # start failures. Fallback to START_FAILED when uncoded.
+        code = e.code or "START_FAILED"
+        status = 409 if code == "BUDGET_EXCEEDED" else 500
+        raise HTTPException(status_code=status, detail={"code": code, "message": str(e)})
     return result
 
 

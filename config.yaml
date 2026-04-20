@@ -269,6 +269,38 @@ backends:
     manifest: serving/kokoro/manifest.yaml
     port: 8880
 
+# Phase-2 resource accounting. Admission checks sum(model.size_gb +
+# kv_margin_gb) across running instances; over-budget ensures evict LRU
+# non-resident siblings. Defaults are conservative for DGX Spark
+# (128 GB unified memory).
+resources:
+  memory_budget_gb: 100
+  kv_margin_gb: 10
+  auto_start_resident: true   # on startup, bring up every role in `resident:`
+  auto_start_parallel: false  # serial by default — cold NVMe reads stampede at parallel start
+
+# Named roles referenced by the `resident:` list. Swapping a role's
+# model here (e.g. changing chat to gemma-4-E2B-it on a smaller GPU)
+# keeps `resident:` declarative without needing to edit two sections.
+roles:
+  chat:      { model: gemma-4-31B-it-nvfp4, backend: vllm }
+  coder:     { model: qwen3-coder-30b,      backend: ollama }
+  tts:       { model: kokoro-v1,            backend: kokoro }
+  image-gen: { model: flux1-schnell,        backend: comfyui }
+  vision:    { model: qwen3-6-35b-a3b,      backend: vllm }
+
+# Roles that auto-start on launcher boot and are never picked as LRU
+# eviction victims. Empty by default — users opt into "always warm" by
+# uncommenting the roles they want. With the above set active, total
+# baseline reservation is ~83 GB + 4 × kv_margin (~123 GB), which fits
+# comfortably under the 100 GB budget once Kokoro/Flux have settled.
+resident: []
+# resident:
+#   - chat
+#   - coder
+#   - tts
+#   - image-gen
+
 clients:
   aider:
     manifest: clients/aider/manifest.yaml
