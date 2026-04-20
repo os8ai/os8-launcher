@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from src.config import Config
 
 
+class PortAllocationError(Exception):
+    """Raised when no free port can be found for a new backend instance."""
+
+
 def serve_combo(
     model: str,
     backend: str | None,
@@ -39,6 +43,62 @@ def check_port(port: int) -> bool:
             return True
     except (ConnectionRefusedError, OSError):
         return False
+
+
+def allocate_port(
+    backend_name: str,
+    model_name: str,
+    default_port: int,
+    reserved_ports: set[int] | None = None,
+    scan_window: int = 90,
+) -> int:
+    """Pick a free localhost port for a new backend instance.
+
+    Priority (highest wins):
+      1. Per-instance override in settings.yaml
+         (port_overrides["{backend}-{model}"]).
+      2. The backend's configured port — already post per-kind override
+         from settings.yaml and the Ports tab; this is BackendConfig.port.
+      3. First free port in range(default_port + 10, default_port + 10 +
+         scan_window). The +10 offset leaves a visible gap between "the
+         port you configured" and allocator-chosen siblings so `lsof`
+         output stays readable.
+
+    `reserved_ports` is the set of ports earmarked for other instances
+    about to start in the same pass — the allocator uses it to avoid
+    handing out the same candidate twice before any of them bind.
+    """
+    # Lazy imports avoid a circular: settings and state both import runtime.
+    from src.settings import get_port_overrides
+    from src.state import compute_instance_id
+
+    instance_id = compute_instance_id(backend_name, model_name)
+    reserved = set(reserved_ports or ())
+    overrides = get_port_overrides()
+
+    per_instance = overrides.get(instance_id)
+    if per_instance is not None:
+        if per_instance in reserved or check_port(per_instance):
+            raise PortAllocationError(
+                f"Per-instance port override {per_instance} for "
+                f"{instance_id} is in use."
+            )
+        return per_instance
+
+    if default_port not in reserved and not check_port(default_port):
+        return default_port
+
+    for offset in range(10, 10 + scan_window):
+        candidate = default_port + offset
+        if candidate in reserved:
+            continue
+        if not check_port(candidate):
+            return candidate
+
+    raise PortAllocationError(
+        f"No free port for {instance_id} in range("
+        f"{default_port + 10}, {default_port + 10 + scan_window})."
+    )
 
 
 def expand_template(template: str, variables: dict) -> str:

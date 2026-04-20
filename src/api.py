@@ -482,13 +482,17 @@ def api_serve_stop():
 
 
 @app.delete("/api/backend")
-def api_backend_stop():
-    """Stop only the backend, leaving clients running.
+def api_backend_stop(instance_id: str | None = None):
+    """Stop a backend instance, leaving clients running.
 
-    Used by the per-row Stop button next to the backend in the active session.
+    With `instance_id`, targets that specific instance — required when
+    multiple backends are resident and the caller wants to stop just one.
+    Without, stops the primary (most-recently-started); back-compat for
+    the dashboard's per-row Stop button while it still reads the
+    singular `backend:` field on /api/status.
     """
     try:
-        _run_with_log_capture(stop_backend)
+        _run_with_log_capture(stop_backend, instance_id)
     except BackendError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "stopped"}

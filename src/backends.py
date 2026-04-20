@@ -43,7 +43,13 @@ from src.preflight import (
     resolve_image,
     run_checks,
 )
-from src.runtime import check_port, expand_template, build_env_for_venv, parse_command
+from src.runtime import (
+    allocate_port,
+    expand_template,
+    build_env_for_venv,
+    parse_command,
+    PortAllocationError,
+)
 from src.state import (
     validate_state,
     set_backend,
@@ -141,10 +147,17 @@ def _check_model_downloaded(model_path: Path) -> bool:
     return any(model_path.rglob("*"))
 
 
-def _build_variables(model, backend, config, repo_root: Path) -> dict:
-    """Build the template variables dict for a backend run command."""
+def _build_variables(model, backend, config, repo_root: Path, port: int | None = None) -> dict:
+    """Build the template variables dict for a backend run command.
+
+    `port` overrides backend.port when the allocator has assigned a
+    non-default port to a sibling instance. Leaves backend.port un-
+    mutated so subsequent allocations against the same BackendConfig
+    keep seeing the configured default.
+    """
+    assigned_port = port if port is not None else backend.port
     variables = {
-        "port": str(backend.port),
+        "port": str(assigned_port),
         "model_path": str(repo_root / model.path),
         "model_name": model.name,
         "repo_root": str(repo_root),
@@ -210,6 +223,20 @@ def _inject_docker_flags(cmd: list[str], name: str) -> list[str]:
     if len(cmd) >= 2 and cmd[0] == "docker" and cmd[1] == "run":
         return cmd[:2] + ["-d", "--rm", "--name", f"os8-{name}"] + cmd[2:]
     return cmd
+
+
+def _docker_rm_force(container_name: str):
+    """Force-remove a (possibly-stopped) Docker container by name, ignoring
+    "no such container" errors.
+
+    Used as pre-start cleanup so a host crash that left a stopped container
+    (with --rm not having fired) doesn't block the next start with a
+    "container name already in use" error.
+    """
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        capture_output=True, timeout=30,
+    )
 
 
 def _image_present(image: str) -> bool:
@@ -305,9 +332,14 @@ def _ensure_image_present(
     print(f"Image pulled successfully.")
 
 
-def container_log_path(backend_name: str, repo_root: Path) -> Path:
-    """Return the on-disk path where this backend's container logs are streamed."""
-    return repo_root / "var" / "backends" / f"{backend_name}.log"
+def container_log_path(instance_id: str, repo_root: Path) -> Path:
+    """Return the on-disk path where an instance's logs are streamed.
+
+    Keyed by instance_id (not backend kind) so two instances of the same
+    backend — say, two vLLM processes serving different models — don't
+    collide into the same log file.
+    """
+    return repo_root / "var" / "backends" / f"{instance_id}.log"
 
 
 def _start_container_log_streamer(
@@ -536,21 +568,7 @@ def _start_backend_inner(
     config: Config,
     repo_root: Path,
 ):
-    # 1. Validate state — check nothing is already running.
-    # Phase 2 staging: the storage schema supports multiple resident
-    # backends, but launcher-1 preserves the single-backend-at-a-time
-    # runtime guard. Concurrent starts are gated in here until launcher-2
-    # lifts the restriction and wires in the port allocator.
-    state = validate_state()
-    existing = get_primary_backend(state)
-    if existing:
-        raise BackendError(
-            f"{existing['name']} is already serving {existing['model']} "
-            f"on port {existing['port']}.\n"
-            f"Run ./launcher stop first."
-        )
-
-    # 2. Resolve model and backend
+    # 1. Resolve model and backend
     model = config.get_model(model_name)
     backend_name = backend_name or model.default_backend
 
@@ -564,6 +582,21 @@ def _start_backend_inner(
     manifest = backend.manifest
     if not manifest:
         raise BackendError(f"Backend '{backend_name}' has no manifest.")
+
+    instance_id = compute_instance_id(backend_name, model_name)
+
+    # 2. Validate state — refuse only if *this exact instance* is already
+    # running. Two different (backend, model) pairs can coexist under the
+    # Phase 2 port allocator.
+    state = validate_state()
+    existing_instances = state.get("backends") or {}
+    if instance_id in existing_instances:
+        b = existing_instances[instance_id]
+        raise BackendError(
+            f"{b['name']} is already serving {b['model']} on port {b['port']}.\n"
+            f"Stop it with: ./launcher stop (stops everything) or wait for idempotent "
+            f"/api/serve/ensure to no-op."
+        )
 
     # 3. Check model is downloaded. Backends that manage their own model store
     #    (download.type: daemon-pull / none) or that download on first run from
@@ -590,19 +623,25 @@ def _start_backend_inner(
     if not run_checks(checks):
         raise BackendError("Prerequisites not met.")
 
-    # 5. Check port
-    if check_port(backend.port):
-        raise BackendError(
-            f"Port {backend.port} is already in use.\n"
-            f"Check with: lsof -i :{backend.port}"
+    # 5. Allocate a port. Priority: per-instance override > configured
+    # default > first free in a +10 scan window. The ports other running
+    # instances already hold are implicitly honored via check_port — they
+    # bind their sockets, so the scan skips them.
+    try:
+        assigned_port = allocate_port(
+            backend_name, model_name, backend.port,
         )
+    except PortAllocationError as e:
+        raise BackendError(str(e))
+    if assigned_port != backend.port:
+        print(f"  Port {backend.port} in use; allocator picked {assigned_port}.")
 
     # 6. Build variables and expand template
     run_template = manifest.fields.get("run")
     if not run_template:
         raise BackendError(f"Manifest for '{backend_name}' has no 'run' field.")
 
-    variables = _build_variables(model, backend, config, repo_root)
+    variables = _build_variables(model, backend, config, repo_root, port=assigned_port)
 
     # If the run template references a declared credential that wasn't
     # picked up by _build_variables (because it isn't set yet), prompt for it.
@@ -647,13 +686,19 @@ def _start_backend_inner(
                 manifest=manifest,
                 repo_root=repo_root,
             )
-        container_id = _start_container(cmd_string, backend_name)
+        # Clear any stale container left over from a previous crash. With
+        # --rm containers are usually auto-removed, but a host crash or
+        # OOM kill can leave a stopped container with this name and block
+        # the next start. Per-instance name (os8-{instance_id}) keeps this
+        # from colliding with a sibling that's legitimately running.
+        _docker_rm_force(f"os8-{instance_id}")
+        container_id = _start_container(cmd_string, instance_id)
         print(f"  Container started: {container_id[:12]}")
         # Stream the container's full logs to disk so the user (and the
         # dashboard) can tail real progress instead of relying on the
         # 5-line snapshots emitted during the health-check loop.
-        log_path = container_log_path(backend_name, repo_root)
-        _start_container_log_streamer(f"os8-{backend_name}", log_path)
+        log_path = container_log_path(instance_id, repo_root)
+        _start_container_log_streamer(f"os8-{instance_id}", log_path)
         print(f"  Streaming logs to: {log_path.relative_to(repo_root)}")
         check_alive = lambda: is_container_running(container_id)
 
@@ -669,7 +714,7 @@ def _start_backend_inner(
             )
         raw_env = manifest.fields.get("env") or {}
         extra_env = {k: expand_template(v, variables) for k, v in raw_env.items()} if raw_env else None
-        log_path = container_log_path(backend_name, repo_root)
+        log_path = container_log_path(instance_id, repo_root)
         cwd_rel = manifest.fields.get("cwd")
         cwd = repo_root / cwd_rel if cwd_rel else None
         process = _start_pip_process(cmd_string, venv_path, extra_env, log_path=log_path, cwd=cwd)
@@ -686,7 +731,7 @@ def _start_backend_inner(
                 f"Run: ./launcher setup {backend_name}"
             )
         binary_env = manifest.fields.get("env") or {}
-        log_path = container_log_path(backend_name, repo_root)
+        log_path = container_log_path(instance_id, repo_root)
         process = _start_binary_process(cmd_string, extra_env=binary_env, log_path=log_path)
         pid = process.pid
         print(f"  Streaming logs to: {log_path.relative_to(repo_root)}")
@@ -702,12 +747,12 @@ def _start_backend_inner(
     set_backend(
         name=backend_name,
         model=model_name,
-        port=backend.port,
+        port=assigned_port,
         install_type=manifest.install_type,
         pid=pid,
         container_id=container_id,
         health_path=health_path,
-        instance_id=compute_instance_id(backend_name, model_name),
+        instance_id=instance_id,
     )
 
     # 9. Post-start hook (optional) — runs before the health check.
@@ -719,14 +764,14 @@ def _start_backend_inner(
     # Manifests can override the default timeout (e.g. NIM cold-start can take
     # 30-60+ minutes while TensorRT-LLM engine files download from NGC).
     health_timeout = int(manifest.fields.get("health_timeout") or 900)
-    container_name_for_logs = f"os8-{backend_name}" if container_id else None
+    container_name_for_logs = f"os8-{instance_id}" if container_id else None
     # Every backend now writes its logs to disk (containers via streamer,
     # binary/pip via direct redirection), so the wait loop can tail real
     # progress regardless of install type.
-    log_path_for_wait = container_log_path(backend_name, repo_root)
+    log_path_for_wait = container_log_path(instance_id, repo_root)
     try:
         _wait_for_healthy(
-            backend.port,
+            assigned_port,
             check_alive,
             timeout=health_timeout,
             container_name=container_name_for_logs,
@@ -736,11 +781,11 @@ def _start_backend_inner(
     except BackendError as e:
         print("\n  Cleaning up...")
         record_failure(model_name, backend_name, str(e))
-        stop_backend()
+        stop_backend(instance_id=instance_id)
         raise
     except KeyboardInterrupt:
         print("\n  Cleaning up...")
-        stop_backend()
+        stop_backend(instance_id=instance_id)
         raise
 
     # 10. Record verification + report success
@@ -751,29 +796,37 @@ def _start_backend_inner(
     )
     record_success(model_name, backend_name, runtime=runtime_id)
     print(f"\nBackend ready: {model_name} via {backend_name}")
-    print(f"  URL:      http://localhost:{backend.port}")
-    print(f"  API base: http://localhost:{backend.port}/v1")
+    print(f"  URL:      http://localhost:{assigned_port}")
+    print(f"  API base: http://localhost:{assigned_port}/v1")
 
 
-def stop_backend():
-    """Stop the running backend.
+def stop_backend(instance_id: str | None = None):
+    """Stop a running backend instance.
 
-    Phase 2 staging: launcher-1 keeps the single-backend runtime guard, so
-    at most one entry ever exists — this still reads via
-    get_primary_backend. launcher-2 will grow an instance_id argument so
-    `./launcher stop <instance>` can target one of many.
+    With `instance_id`, stops that specific instance. Without, stops the
+    primary (most-recently-started) instance — back-compat for single-
+    backend callers. Raises BackendError if `instance_id` doesn't match
+    any known instance.
     """
     state = validate_state()
-    backend = get_primary_backend(state)
+    backends = state.get("backends") or {}
 
-    if not backend:
-        print("No backend running.")
-        return
+    if instance_id is not None:
+        entry = backends.get(instance_id)
+        if not entry:
+            print(f"Instance '{instance_id}' is not running.")
+            return
+        target = entry
+    else:
+        target = get_primary_backend(state)
+        if not target:
+            print("No backend running.")
+            return
 
-    name = backend["name"]
+    name = target["name"]
     log_start("backend", name)
     try:
-        _stop_backend_inner(backend)
+        _stop_backend_inner(target)
     except Exception as e:
         log_fail("backend", name, e)
         raise
@@ -782,14 +835,16 @@ def stop_backend():
 
 def _stop_backend_inner(backend: dict):
     name = backend["name"]
-    instance_id = backend.get("instance_id")
+    instance_id = backend.get("instance_id") or compute_instance_id(name, backend.get("model", ""))
     install_type = backend.get("install_type")
     container_id = backend.get("container_id")
     pid = backend.get("pid")
 
     if install_type == "container" and container_id:
+        # Per-instance container name — a sibling backend on the same
+        # kind (e.g. a second vllm) won't be affected.
         subprocess.run(
-            ["docker", "stop", f"os8-{name}"],
+            ["docker", "stop", f"os8-{instance_id}"],
             capture_output=True, timeout=45,
         )
         print(f"  Container stopped.")
