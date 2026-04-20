@@ -15,8 +15,9 @@ from pydantic import BaseModel
 from src.config import load_config, config_to_dict, ConfigError
 from src.backends import (
     start_backend, stop_backend, stop_all,
-    get_status_data, BackendError,
+    get_status_data, get_capabilities_data, ensure_backend, BackendError,
 )
+from src.state import touch_backend
 from src.clients import start_client, stop_client, ClientError
 from src.runtime import serve_combo
 from src.credentials import get_ngc_key, set_ngc_key, get_hf_token, set_hf_token
@@ -158,6 +159,16 @@ class ServeRequest(BaseModel):
     model: str
     backend: str | None = None
     client: str | None = None
+
+
+class ServeEnsureRequest(BaseModel):
+    model: str
+    backend: str | None = None
+    wait: bool = False
+
+
+class ServeTouchRequest(BaseModel):
+    instance_id: str
 
 
 class DownloadRequest(BaseModel):
@@ -381,44 +392,19 @@ def api_status():
 
 @app.get("/api/status/capabilities")
 def api_status_capabilities():
-    """Report which OS8 task types the currently-running backend can serve.
+    """Report which OS8 task types each running backend can serve.
 
-    Phase-1 contract (OS8 Local Models plan, v1.1): derive capabilities from the
-    single running backend rather than the full eventual resident pool. The model
-    → task mapping lives in OS8; here we just surface {model, base_url, model_id}
-    per task the running model is eligible for. Returns {} when nothing is
-    serving.
+    Phase-2 shape: {task_type: [ {instance_id, model, base_url,
+    model_id, priority}, ... ]}. Array-valued because with N resident
+    backends multiple instances can cover the same task. Unknown models
+    (not in backends.py::_MODEL_ELIGIBILITY) contribute no entries.
+
+    Back-compat: Phase-1 OS8 read the Phase-1 single-entry map as an
+    object per task. Phase-2 OS8 (os8-2) is array-aware. The change
+    ships alongside the capabilities array contract — OS8 is updated
+    in the same PR sequence.
     """
-    data = get_status_data()
-    backend = data.get("backend")
-    if not backend:
-        return {}
-
-    model_name = backend.get("model")
-    port = backend.get("port")
-    if not model_name or not port:
-        return {}
-
-    base_url = f"http://localhost:{port}"
-    # vLLM runs with `--served-model-name {model_name}`, ollama uses the tag.
-    # For Phase 1 the model name from state matches what /v1/chat/completions
-    # expects as the `model` field. If that diverges later, resolve via the
-    # backend manifest's model_name_template.
-    entry = {
-        "model": model_name,
-        "base_url": base_url,
-        "model_id": model_name,
-    }
-
-    # Map known models to the OS8 task types they're eligible for (Phase 1).
-    # Anything not in this table contributes no capability entries — the OS8
-    # side will ignore unknown models rather than route tasks to them blindly.
-    eligibility = {
-        "gemma-4-31B-it-nvfp4": ["conversation", "summary", "planning"],
-        "gemma-4-E2B-it": ["conversation", "summary"],
-    }
-    tasks = eligibility.get(model_name, [])
-    return {task: entry for task in tasks}
+    return get_capabilities_data()
 
 
 @app.get("/api/models")
@@ -466,6 +452,56 @@ def api_serve(req: ServeRequest, background_tasks: BackgroundTasks):
         serve_combo, req.model, req.backend, req.client, _config(), _repo_root(),
     )
     return {"status": "starting"}
+
+
+@app.post("/api/serve/ensure")
+def api_serve_ensure(req: ServeEnsureRequest, background_tasks: BackgroundTasks):
+    """Idempotent "make sure this model is running".
+
+    Returns immediately with status `ready` (already up and healthy),
+    `loading` (kicked off or already mid-start), or raises 4xx on bad
+    input / 500 on start failure. With `wait: true`, blocks up to the
+    manifest's health_timeout and returns `ready` on success.
+
+    Concurrent ensures for the same (model, backend) pair serialize
+    through a per-instance guard so they never double-start.
+    """
+    try:
+        config = _config()
+        # Fail fast on unknown model/backend before any state lookup.
+        config.get_model(req.model)
+        if req.backend:
+            config.get_backend(req.backend)
+    except ConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    def _schedule(fn):
+        # Wrap in _run_with_log_capture so the start's stdout lands in the
+        # dashboard log panel, matching the /api/serve code path.
+        background_tasks.add_task(_run_with_log_capture, fn)
+
+    try:
+        result = ensure_backend(
+            req.model, req.backend, config, _repo_root(),
+            wait=req.wait,
+            schedule_start=_schedule,
+        )
+    except BackendError as e:
+        # Shape the error so OS8 can distinguish class-level problems
+        # from transient start failures.
+        raise HTTPException(status_code=500, detail={"code": "START_FAILED", "message": str(e)})
+    return result
+
+
+@app.post("/api/serve/touch")
+def api_serve_touch(req: ServeTouchRequest):
+    """Record an instance as recently used — LRU signal from OS8.
+
+    Fire-and-forget from the caller's perspective. Unknown instance_id
+    is a no-op (OS8 may send a stale ID after an eviction; that's fine).
+    """
+    touched = touch_backend(req.instance_id)
+    return {"touched": touched}
 
 
 @app.delete("/api/serve")

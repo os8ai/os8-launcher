@@ -60,11 +60,40 @@ from src.state import (
     get_primary_backend,
     compute_instance_id,
 )
+
+import threading
 from src.verification import record_success, record_failure
 
 
 class BackendError(Exception):
     """Raised when a backend operation fails."""
+
+
+# Coarse guard around the "check state + kick off start" critical section
+# in ensure_backend. FastAPI dispatches sync handlers on a threadpool, so
+# two ensures for the same instance landing at the same time would both
+# see 'missing from state' and both kick off starts. The lock serializes
+# the decision; actual loads run in a background task after the state
+# write, so the critical section is ~microseconds.
+_ensure_lock = threading.Lock()
+
+
+# Per-model → OS8-task eligibility. Drives /api/status/capabilities. The
+# ensure flow doesn't read this table — OS8 asks for a specific model by
+# name — so missing an entry just means a model is invisible to OS8's
+# capability-based discovery, not that it can't be served.
+_MODEL_ELIGIBILITY: dict[str, list[str]] = {
+    "gemma-4-31B-it-nvfp4": ["conversation", "summary", "planning"],
+    "gemma-4-E2B-it": ["conversation", "summary"],
+    "qwen3-coder-30b": ["coding", "jobs"],
+    "qwen3-coder-next": ["coding", "jobs"],
+    "kokoro-v1": ["tts"],
+    "fish-s2-pro": ["tts"],
+    "flux1-schnell": ["image-gen"],
+    "flux1-dev": ["image-gen"],
+    "flux1-kontext-dev": ["image-edit"],
+    "qwen3-6-35b-a3b": ["conversation", "vision"],
+}
 
 
 def served_model_name(model, backend) -> str:
@@ -941,6 +970,179 @@ def _check_health(port: int, health_path: str = "/v1/models") -> str:
             return "healthy"
     except Exception:
         return "unhealthy"
+
+
+# Instances whose start has been scheduled but hasn't yet called
+# set_backend — guards against two concurrent ensures both kicking off a
+# start because neither has persisted state yet. Entries are added under
+# _ensure_lock and removed by the wrapper around start_backend.
+_starting_instances: set[str] = set()
+
+
+def ensure_backend(
+    model_name: str,
+    backend_name: str | None,
+    config: Config,
+    repo_root: Path,
+    wait: bool = False,
+    schedule_start: "callable | None" = None,
+) -> dict:
+    """Make sure the (backend, model) instance is running. Idempotent.
+
+    Return shape:
+        {"status": "ready"|"loading",
+         "instance_id": ..., "port": int|None, "base_url": str|None,
+         "model": ..., "backend": ...}
+
+    `ready` means a state entry exists AND its health endpoint responds
+    200. `loading` means either a state entry exists but isn't yet
+    healthy, or a start has just been scheduled and state hasn't been
+    written.
+
+    With `wait=True`, runs the start synchronously and returns once
+    healthy (or raises BackendError on failure / timeout). With
+    `wait=False` (default), schedules the start via `schedule_start` —
+    caller passes FastAPI's background_tasks.add_task (wrapped in
+    _run_with_log_capture) or any other `callable(fn, *args)` sink.
+    """
+    # Resolve up front so we fail fast on bad input, before any lock.
+    model = config.get_model(model_name)
+    resolved_backend = backend_name or model.default_backend
+    if resolved_backend not in model.backends:
+        raise BackendError(
+            f"Backend '{resolved_backend}' is not compatible with "
+            f"model '{model_name}'. Compatible: {', '.join(model.backends)}"
+        )
+    backend = config.get_backend(resolved_backend)
+    instance_id = compute_instance_id(resolved_backend, model_name)
+
+    with _ensure_lock:
+        state = validate_state()
+        backends_running = state.get("backends") or {}
+        existing = backends_running.get(instance_id)
+        if existing:
+            port = existing.get("port")
+            health_path = existing.get("health_path") or "/v1/models"
+            status = "ready" if _check_health(port, health_path) == "healthy" else "loading"
+            return {
+                "status": status,
+                "instance_id": instance_id,
+                "port": port,
+                "base_url": f"http://localhost:{port}" if port else None,
+                "model": model_name,
+                "backend": resolved_backend,
+            }
+
+        if instance_id in _starting_instances:
+            # Another ensure already scheduled this one; don't double-start.
+            return {
+                "status": "loading",
+                "instance_id": instance_id,
+                "port": None,
+                "base_url": None,
+                "model": model_name,
+                "backend": resolved_backend,
+            }
+
+        if not wait:
+            if schedule_start is None:
+                raise BackendError(
+                    "ensure_backend with wait=False requires schedule_start."
+                )
+            _starting_instances.add(instance_id)
+
+    # Released lock — actual start runs here (sync if wait=True, else
+    # dispatched via schedule_start).
+    def _run_and_unmark():
+        try:
+            start_backend(model_name, resolved_backend, config, repo_root)
+        finally:
+            with _ensure_lock:
+                _starting_instances.discard(instance_id)
+
+    if wait:
+        # Synchronous. Re-check under the lock to catch a concurrent
+        # ensure that just flipped to 'ready' while we were waiting.
+        with _ensure_lock:
+            state = validate_state()
+            existing = (state.get("backends") or {}).get(instance_id)
+            if existing:
+                port = existing.get("port")
+                hp = existing.get("health_path") or "/v1/models"
+                if _check_health(port, hp) == "healthy":
+                    return {
+                        "status": "ready",
+                        "instance_id": instance_id,
+                        "port": port,
+                        "base_url": f"http://localhost:{port}",
+                        "model": model_name,
+                        "backend": resolved_backend,
+                    }
+            _starting_instances.add(instance_id)
+        try:
+            start_backend(model_name, resolved_backend, config, repo_root)
+        finally:
+            with _ensure_lock:
+                _starting_instances.discard(instance_id)
+        state = validate_state()
+        entry = (state.get("backends") or {}).get(instance_id)
+        if not entry:
+            raise BackendError(
+                f"ensure(wait=True): {instance_id} vanished after start."
+            )
+        port = entry.get("port")
+        return {
+            "status": "ready",
+            "instance_id": instance_id,
+            "port": port,
+            "base_url": f"http://localhost:{port}",
+            "model": model_name,
+            "backend": resolved_backend,
+        }
+
+    # wait=False: schedule the start and return 'loading' immediately.
+    # _starting_instances already set under the lock above.
+    schedule_start(_run_and_unmark)
+    return {
+        "status": "loading",
+        "instance_id": instance_id,
+        "port": None,
+        "base_url": None,
+        "model": model_name,
+        "backend": resolved_backend,
+    }
+
+
+def get_capabilities_data() -> dict:
+    """Return {task_type: [entry, ...]} for all currently-running
+    backends, derived from the _MODEL_ELIGIBILITY table.
+
+    Each entry carries enough for OS8 to bypass `/api/status` entirely
+    for task-based routing: {instance_id, model, base_url, model_id,
+    priority}. Launcher-3 keeps `priority: 0` for everything; launcher-4
+    (or a follow-up) may use the resident set to bias priority.
+
+    Shape change from Phase-1: values are arrays, not objects, because
+    with N running backends multiple instances can cover a given task.
+    """
+    state = validate_state()
+    backends = state.get("backends") or {}
+    per_task: dict[str, list[dict]] = {}
+    for entry in backends.values():
+        model = entry.get("model")
+        port = entry.get("port")
+        if not model or not port:
+            continue
+        eligible = _MODEL_ELIGIBILITY.get(model, [])
+        for task in eligible:
+            per_task.setdefault(task, []).append({
+                "instance_id": entry.get("instance_id"),
+                "model": model,
+                "base_url": f"http://localhost:{port}",
+                "model_id": model,
+                "priority": 0,
+            })
+    return per_task
 
 
 def get_status_data() -> dict:

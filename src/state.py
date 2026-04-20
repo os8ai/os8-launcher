@@ -172,6 +172,27 @@ def get_primary_backend(data: dict) -> dict | None:
     )
 
 
+def touch_backend(instance_id: str) -> bool:
+    """Mark an instance as recently used (LRU signal for launcher-4).
+
+    Returns True if the instance exists and was updated, False otherwise.
+    Used by /api/serve/touch — a cheap hint from OS8 that this instance
+    just served a request. The `last_used` field is stored but not yet
+    consulted for eviction (that lands in launcher-4). Missing launcher-4
+    keeps this a no-op in practice, which is intentional: OS8 fires touch
+    unconditionally and we don't want a read-modify-write on every request
+    to be load-bearing.
+    """
+    data = load_state()
+    backends = data.get("backends") or {}
+    entry = backends.get(instance_id)
+    if not entry:
+        return False
+    entry["last_used"] = datetime.now().isoformat()
+    save_state(data)
+    return True
+
+
 def set_client(
     name: str,
     port: int,

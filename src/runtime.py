@@ -64,16 +64,24 @@ def allocate_port(
          port you configured" and allocator-chosen siblings so `lsof`
          output stays readable.
 
-    `reserved_ports` is the set of ports earmarked for other instances
-    about to start in the same pass — the allocator uses it to avoid
-    handing out the same candidate twice before any of them bind.
+    `reserved_ports` is an explicit set of ports to avoid (e.g.
+    earmarked for other instances about to start in the same pass).
+    Ports of currently-recorded backends in state.yaml are implicitly
+    avoided too, so a sibling mid-start whose socket isn't yet listening
+    doesn't get its port handed out twice.
     """
     # Lazy imports avoid a circular: settings and state both import runtime.
     from src.settings import get_port_overrides
-    from src.state import compute_instance_id
+    from src.state import compute_instance_id, load_state
 
     instance_id = compute_instance_id(backend_name, model_name)
     reserved = set(reserved_ports or ())
+    # Include ports of all recorded backends — shields the allocator from
+    # a race where a sibling has written state but not yet bound.
+    for entry in (load_state().get("backends") or {}).values():
+        p = entry.get("port")
+        if isinstance(p, int):
+            reserved.add(p)
     overrides = get_port_overrides()
 
     per_instance = overrides.get(instance_id)
