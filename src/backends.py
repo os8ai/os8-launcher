@@ -51,6 +51,8 @@ from src.state import (
     clear_client,
     is_process_alive,
     is_container_running,
+    get_primary_backend,
+    compute_instance_id,
 )
 from src.verification import record_success, record_failure
 
@@ -534,12 +536,17 @@ def _start_backend_inner(
     config: Config,
     repo_root: Path,
 ):
-    # 1. Validate state — check nothing is already running
+    # 1. Validate state — check nothing is already running.
+    # Phase 2 staging: the storage schema supports multiple resident
+    # backends, but launcher-1 preserves the single-backend-at-a-time
+    # runtime guard. Concurrent starts are gated in here until launcher-2
+    # lifts the restriction and wires in the port allocator.
     state = validate_state()
-    if "backend" in state:
-        b = state["backend"]
+    existing = get_primary_backend(state)
+    if existing:
         raise BackendError(
-            f"{b['name']} is already serving {b['model']} on port {b['port']}.\n"
+            f"{existing['name']} is already serving {existing['model']} "
+            f"on port {existing['port']}.\n"
             f"Run ./launcher stop first."
         )
 
@@ -700,6 +707,7 @@ def _start_backend_inner(
         pid=pid,
         container_id=container_id,
         health_path=health_path,
+        instance_id=compute_instance_id(backend_name, model_name),
     )
 
     # 9. Post-start hook (optional) — runs before the health check.
@@ -748,9 +756,15 @@ def _start_backend_inner(
 
 
 def stop_backend():
-    """Stop the running backend."""
+    """Stop the running backend.
+
+    Phase 2 staging: launcher-1 keeps the single-backend runtime guard, so
+    at most one entry ever exists — this still reads via
+    get_primary_backend. launcher-2 will grow an instance_id argument so
+    `./launcher stop <instance>` can target one of many.
+    """
     state = validate_state()
-    backend = state.get("backend")
+    backend = get_primary_backend(state)
 
     if not backend:
         print("No backend running.")
@@ -768,6 +782,7 @@ def stop_backend():
 
 def _stop_backend_inner(backend: dict):
     name = backend["name"]
+    instance_id = backend.get("instance_id")
     install_type = backend.get("install_type")
     container_id = backend.get("container_id")
     pid = backend.get("pid")
@@ -795,15 +810,16 @@ def _stop_backend_inner(backend: dict):
         except ProcessLookupError:
             print(f"  Process already exited.")
 
-    clear_backend()
+    clear_backend(instance_id)
 
 
 def stop_all():
-    """Stop the backend and all tracked clients."""
+    """Stop every backend and all tracked clients."""
     state = validate_state()
     clients = state.get("clients", {})
+    backends = state.get("backends") or {}
 
-    if not clients and "backend" not in state:
+    if not clients and not backends:
         print("Nothing running.")
         return
 
@@ -825,9 +841,18 @@ def stop_all():
                 raise
             log_stopped("client", client_name)
 
-        # Stop backend
-        if "backend" in state:
-            stop_backend()
+        # Stop every backend. launcher-1 only ever has ≤1 entry here,
+        # but iterating keeps the call correct once launcher-2 lifts the
+        # single-backend guard.
+        for entry in list(backends.values()):
+            name = entry["name"]
+            log_start("backend", name)
+            try:
+                _stop_backend_inner(entry)
+            except Exception as e:
+                log_fail("backend", name, e)
+                raise
+            log_stopped("backend", name)
     except Exception as e:
         log_fail("group", "all services", e)
         raise
@@ -864,25 +889,54 @@ def _check_health(port: int, health_path: str = "/v1/models") -> str:
 
 
 def get_status_data() -> dict:
-    """Return structured status for JSON serialization."""
+    """Return structured status for JSON serialization.
+
+    Wire shape (Phase 2):
+        {
+          "backends": [ {instance_id, name, model, port, health, ...}, ... ],
+          "backend": {...} | null,   # back-compat shim: the primary instance
+          "clients": {name: {...}}
+        }
+
+    The singular `backend` key preserves the pre-Phase-2 contract for
+    clients like Phase-1 OS8 that still consume it. It mirrors the most-
+    recently-started backend (or null when nothing is running). Callers
+    with multi-instance awareness should read `backends`; `backend` will
+    be removed after OS8 migrates off the shim (Phase 3).
+    """
     state = validate_state()
-    backend = state.get("backend")
+    backends = state.get("backends") or {}
     clients = state.get("clients", {})
 
-    result = {"backend": None, "clients": {}}
-
-    if backend:
-        health = _check_health(backend["port"], backend.get("health_path") or "/v1/models")
-        uptime = _format_uptime(backend.get("start_time", ""))
-        result["backend"] = {
-            "name": backend["name"],
-            "model": backend["model"],
-            "port": backend["port"],
+    def _describe(entry: dict) -> dict:
+        port = entry.get("port")
+        health = _check_health(port, entry.get("health_path") or "/v1/models")
+        uptime = _format_uptime(entry.get("start_time", ""))
+        return {
+            "instance_id": entry.get("instance_id"),
+            "name": entry["name"],
+            "model": entry["model"],
+            "port": port,
+            "base_url": f"http://localhost:{port}" if port else None,
             "health": health,
             "uptime": uptime,
-            "start_time": backend.get("start_time"),
-            "install_type": backend.get("install_type"),
+            "start_time": entry.get("start_time"),
+            "install_type": entry.get("install_type"),
         }
+
+    backends_list = [_describe(e) for e in backends.values()]
+    # Sort so the "primary" (most-recently-started) is last-in in a stable way.
+    backends_list.sort(key=lambda b: b.get("start_time") or "")
+
+    # Back-compat shim — single-backend callers read the most-recently-
+    # started entry via get_status_data()["backend"].
+    primary = backends_list[-1] if backends_list else None
+
+    result = {
+        "backends": backends_list,
+        "backend": primary,
+        "clients": {},
+    }
 
     for name, entry in clients.items():
         result["clients"][name] = {

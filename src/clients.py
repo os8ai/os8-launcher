@@ -17,6 +17,7 @@ from src.state import (
     mark_client_ready,
     clear_client,
     is_container_running,
+    get_primary_backend,
 )
 
 
@@ -53,8 +54,13 @@ class ClientError(Exception):
 
 
 def _get_running_backend(state: dict) -> dict:
-    """Get the running backend from state, or raise."""
-    backend = state.get("backend")
+    """Get a running backend from state, or raise.
+
+    Clients today assume exactly one backend is running. Phase 2's
+    storage schema supports many, but launcher-1 keeps the runtime guard
+    so this still picks the single entry (via the primary-backend shim).
+    """
+    backend = get_primary_backend(state)
     if not backend:
         raise ClientError(
             "No backend running.\n"
@@ -141,7 +147,7 @@ def _start_client_inner(
     ignored — we never restart a working backend.
     """
     state = validate_state()
-    if not state.get("backend") and model:
+    if not get_primary_backend(state) and model:
         # Auto-start the backend the user picked in the launch controls.
         from src.backends import start_backend
         start_backend(model, backend_name, config, repo_root)
