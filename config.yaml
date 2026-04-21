@@ -279,27 +279,25 @@ resources:
   auto_start_resident: true   # on startup, bring up every role in `resident:`
   auto_start_parallel: false  # serial by default — cold NVMe reads stampede at parallel start
 
-# Named roles referenced by the `resident:` list. Swapping a role's
-# model here (e.g. changing chat to gemma-4-E2B-it on a smaller GPU)
-# keeps `resident:` declarative without needing to edit two sections.
+# Named roles referenced by the `resident:` list. The OS8 v2 plan uses
+# a three-role triplet: qwen3-6-35b-a3b for chat (covers all text tasks
+# + vision via its multimodal head), flux1-kontext-dev for image (needs
+# a reference image, see LOCAL_MODELS_PLAN.md v2), kokoro-v1 for voice.
+# Swap the model here for a different GPU (e.g. chat → gemma-4-E2B-it
+# on 24 GB cards) without touching the `resident:` list.
 roles:
-  chat:      { model: gemma-4-31B-it-nvfp4, backend: vllm }
-  coder:     { model: qwen3-coder-30b,      backend: ollama }
-  tts:       { model: kokoro-v1,            backend: kokoro }
-  image-gen: { model: flux1-schnell,        backend: comfyui }
-  vision:    { model: qwen3-6-35b-a3b,      backend: vllm }
+  chat:      { model: qwen3-6-35b-a3b,   backend: vllm }
+  image-gen: { model: flux1-kontext-dev, backend: comfyui }
+  tts:       { model: kokoro-v1,         backend: kokoro }
 
-# Roles that auto-start on launcher boot and are never picked as LRU
-# eviction victims. Empty by default — users opt into "always warm" by
-# uncommenting the roles they want. With the above set active, total
-# baseline reservation is ~83 GB + 4 × kv_margin (~123 GB), which fits
-# comfortably under the 100 GB budget once Kokoro/Flux have settled.
-resident: []
-# resident:
-#   - chat
-#   - coder
-#   - tts
-#   - image-gen
+# Auto-started on launcher boot and never picked as LRU eviction victims.
+# Triplet size: 36 GB (qwen3.6) + 18 GB (kontext) + 0.3 GB (kokoro)
+# = ~54 GB, plus KV margins ≈ 70 GB — fits comfortably under the 100 GB
+# budget on a 128 GB DGX Spark.
+resident:
+  - chat
+  - image-gen
+  - tts
 
 clients:
   aider:
