@@ -210,7 +210,14 @@ models:
     downloaded: false
     size_gb: 36
     backend_env: {}
-    backend_args: "--max-model-len 65536 --gpu-memory-utilization 0.80 --tensor-parallel-size 1 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --allowed-origins '[\"*\"]' --speculative-config '{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}'"
+    # gpu-memory-utilization 0.60 (not vLLM's default 0.90): the Spark's 122 GB
+    # unified memory is shared among qwen3.6 + Kontext (ComfyUI, ~18 GB) + Kokoro
+    # (~2 GB w/ PyTorch overhead). At 0.80 vLLM reserves ~97 GB and Kokoro OOMs
+    # on load. 0.60 reserves ~73 GB for vLLM — still ample for the 36 GB model
+    # with a generous KV cache — and leaves ~49 GB for the other two residents
+    # with headroom. Bump up if Qwen drops long-context turns off the KV cache
+    # on your workload.
+    backend_args: "--max-model-len 65536 --gpu-memory-utilization 0.60 --tensor-parallel-size 1 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --allowed-origins '[\"*\"]' --speculative-config '{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}'"
 
   # --- text-to-speech: Kokoro v1, 82M params, 54 prebuilt voices, 8 languages ---
   # Lightweight TTS with high-quality prebuilt voices.  Served via Kokoro-FastAPI
