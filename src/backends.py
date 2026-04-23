@@ -1023,11 +1023,23 @@ _starting_instances: dict[str, float] = {}
 
 
 def _reserved_gb(state_data: dict, kv_margin: float) -> float:
-    """Sum (size_gb + kv_margin) over every running AND pending instance."""
+    """Sum (size_gb + kv_margin) over every running AND pending instance.
+
+    An instance is added to `_starting_instances` at admission time and
+    removed only when the start fully completes (~90s for vLLM). Between
+    `set_backend` (which writes to state.yaml) and that completion, an
+    instance exists in BOTH places. Skip the _starting_instances entry
+    when state already has it — otherwise admission double-counts
+    in-flight starts and rejects subsequent ensures under a budget that
+    would otherwise fit.
+    """
+    backends = state_data.get("backends") or {}
     total = 0.0
-    for entry in (state_data.get("backends") or {}).values():
+    for entry in backends.values():
         total += float(entry.get("size_gb") or 0) + kv_margin
-    for size in _starting_instances.values():
+    for instance_id, size in _starting_instances.items():
+        if instance_id in backends:
+            continue  # already counted via state
         total += float(size) + kv_margin
     return total
 
