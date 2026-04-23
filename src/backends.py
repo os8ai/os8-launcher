@@ -87,6 +87,31 @@ class BackendError(Exception):
 _ensure_lock = threading.Lock()
 
 
+def _is_configured_resident(config, model_name: str, backend_name: str) -> bool:
+    """True if this (model, backend) pair matches one of the roles in
+    `config.resident`. Used by ensure_backend to auto-promote user-driven
+    ensures into resident pins when the user declared them resident in
+    config.yaml — so a direct /api/serve/ensure for a configured resident
+    doesn't accidentally become an eviction target for the next ensure.
+
+    Matches are strict: the role's model must equal `model_name`, and the
+    role's backend (if specified) must equal `backend_name`. A role whose
+    backend is None matches any backend for that model — same default-backend
+    semantics as the rest of the launcher.
+    """
+    resident_roles = config.resident or []
+    roles = config.roles or {}
+    for role_name in resident_roles:
+        role = roles.get(role_name)
+        if not role:
+            continue
+        if role.model != model_name:
+            continue
+        if role.backend is None or role.backend == backend_name:
+            return True
+    return False
+
+
 # Per-model → OS8-task eligibility. Drives /api/status/capabilities. The
 # ensure flow doesn't read this table — OS8 asks for a specific model by
 # name — so missing an entry just means a model is invisible to OS8's
@@ -1067,7 +1092,7 @@ def ensure_backend(
     repo_root: Path,
     wait: bool = False,
     schedule_start: "callable | None" = None,
-    resident: bool = False,
+    resident: bool | None = None,
 ) -> dict:
     """Make sure the (backend, model) instance is running. Idempotent.
 
@@ -1086,9 +1111,17 @@ def ensure_backend(
     fits. Raises BackendError(code=BUDGET_EXCEEDED) when the resident
     set already exceeds the budget and no eviction candidates remain.
 
-    `resident=True` marks the state entry as pinned — auto-start uses
-    this so user-driven ensures never accidentally promote a model to
-    permanent resident.
+    `resident` controls LRU protection:
+      - `True`  — explicitly pin this instance; it becomes ineligible
+                  for eviction.
+      - `False` — explicitly non-resident; can be evicted by a later
+                  ensure under memory pressure.
+      - `None`  (default) — auto-detect from `config.resident`: if the
+                  (model, backend) pair matches one of the configured
+                  resident roles, this is pinned. Otherwise non-resident.
+                  This lets direct /api/serve/ensure calls for the
+                  user's declared resident triplet inherit protection
+                  without every caller having to pass resident=True.
 
     With `wait=True`, runs the start synchronously. With `wait=False`
     (default), schedules via `schedule_start` (typically FastAPI's
@@ -1105,6 +1138,10 @@ def ensure_backend(
     backend = config.get_backend(resolved_backend)
     instance_id = compute_instance_id(resolved_backend, model_name)
     size_gb = float(model.size_gb or 0)
+
+    # Resolve resident flag: explicit wins; None → look at config.resident.
+    if resident is None:
+        resident = _is_configured_resident(config, model_name, resolved_backend)
 
     evicted: list[str] = []
 

@@ -232,6 +232,13 @@ class ServeEnsureRequest(BaseModel):
     model: str
     backend: str | None = None
     wait: bool = False
+    # Explicit resident flag — pins the started instance against LRU eviction.
+    # When None (default), ensure_backend auto-detects from config.resident:
+    # if the (model, backend) pair matches one of the configured resident
+    # roles, it's marked resident automatically. Explicit True/False override
+    # that auto-detection (useful for ad-hoc workflows that want to force
+    # non-resident regardless of config).
+    resident: bool | None = None
 
 
 class ServeTouchRequest(BaseModel):
@@ -552,6 +559,7 @@ def api_serve_ensure(req: ServeEnsureRequest, background_tasks: BackgroundTasks)
             req.model, req.backend, config, _repo_root(),
             wait=req.wait,
             schedule_start=_schedule,
+            resident=req.resident,
         )
     except BackendError as e:
         # Map the error code to an HTTP status so OS8 can branch on it:
