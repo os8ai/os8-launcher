@@ -1005,10 +1005,16 @@ def _format_uptime(start_time_str: str) -> str:
 
 
 def _check_health(port: int, health_path: str = "/v1/models") -> str:
-    """Quick one-shot health check. Returns 'healthy' or 'unhealthy'."""
+    """Quick one-shot health check. Returns 'healthy' or 'unhealthy'.
+
+    Timeout 5s because vLLM's /v1/models can stall briefly during
+    warmup-adjacent moments on large models (qwen3-6-35b a real example) —
+    3s gave sporadic false-negatives where curl answered 200 immediately
+    but the status poll reported unhealthy.
+    """
     try:
         url = f"http://localhost:{port}{health_path}"
-        with urllib.request.urlopen(url, timeout=3):
+        with urllib.request.urlopen(url, timeout=5):
             return "healthy"
     except Exception:
         return "unhealthy"
@@ -1316,6 +1322,8 @@ def get_status_data() -> dict:
             "uptime": uptime,
             "start_time": entry.get("start_time"),
             "install_type": entry.get("install_type"),
+            "resident": bool(entry.get("resident")),
+            "size_gb": entry.get("size_gb"),
         }
 
     backends_list = [_describe(e) for e in backends.values()]
