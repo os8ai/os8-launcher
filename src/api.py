@@ -582,6 +582,39 @@ def api_serve_touch(req: ServeTouchRequest):
     return {"touched": touched}
 
 
+@app.post("/api/triplet/start")
+def api_triplet_start(background_tasks: BackgroundTasks):
+    """Bring up every role in config.resident (the OS8 chat/image/voice triplet).
+
+    Reuses the same helper that used to run on dashboard startup (before
+    auto_start_resident defaulted to false). Returns immediately; progress
+    is visible via /api/status.
+    """
+    config = _config()
+    if not config.resident:
+        raise HTTPException(status_code=400, detail="No resident roles configured in config.yaml")
+    background_tasks.add_task(
+        _run_with_log_capture,
+        _auto_start_resident_set, config, _repo_root(),
+    )
+    return {"status": "starting", "roles": list(config.resident)}
+
+
+@app.delete("/api/triplet")
+def api_triplet_stop():
+    """Stop just the resident instances — leave ad-hoc backends alone."""
+    data = get_status_data()
+    stopped = []
+    for b in data.get("backends", []):
+        if b.get("resident"):
+            try:
+                _run_with_log_capture(stop_backend, b["instance_id"])
+                stopped.append(b["instance_id"])
+            except BackendError:
+                pass
+    return {"status": "stopped", "stopped": stopped}
+
+
 @app.delete("/api/serve")
 def api_serve_stop():
     """Stop everything: clients first, then the backend.

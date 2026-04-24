@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>os8-launcher · chat / image / voice</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        main.triplet {
+            display: grid;
+            grid-template-columns: 1fr;
+            grid-template-rows: auto 1fr;
+            gap: 3px;
+            background: #0f3460;
+            height: calc(100vh - 52px);
+        }
+        .triplet-header {
+            background: #1a1a2e;
+            padding: 1rem 1.5rem;
+        }
+        .triplet-logs {
+            background: #1a1a2e;
+            padding: 1rem 1.5rem;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .triplet-intro p {
+            color: #aaa;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+        .role-rows {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .role-row {
+            display: grid;
+            grid-template-columns: 140px 1fr auto auto;
+            gap: 1rem;
+            align-items: center;
+            background: #16213e;
+            border: 1px solid #2a2a4a;
+            border-radius: 6px;
+            padding: 0.75rem 1rem;
+        }
+        .role-row .role-name {
+            font-weight: 600;
+            color: #e0e0e0;
+            font-size: 0.95rem;
+        }
+        .role-row .role-model {
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+        .role-row .role-size {
+            font-size: 0.8rem;
+            color: #888;
+            font-family: monospace;
+        }
+        .role-row .role-state {
+            font-size: 0.85rem;
+            min-width: 90px;
+            text-align: right;
+        }
+        .state-idle { color: #888; }
+        .state-starting { color: #f39c12; font-weight: 600; }
+        .state-ready { color: #4ecca3; font-weight: 600; }
+        .state-failed { color: #e94560; font-weight: 600; }
+        .triplet-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .triplet-url {
+            font-size: 0.8rem;
+            color: #888;
+            font-family: monospace;
+        }
+        .triplet-url a { color: #5e7ce2; }
+        #triplet-log-pane {
+            background: #0d0d1a;
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            padding: 0.75rem;
+            font-size: 0.75rem;
+            line-height: 1.5;
+            flex: 1;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: #aaa;
+            user-select: text;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1><a href="/" style="color:inherit;text-decoration:none">os8-launcher</a></h1>
+        <span class="subtitle">chat · image · voice</span>
+        <a href="/" class="btn-settings" style="text-decoration:none;display:inline-flex;align-items:center">← Back</a>
+        <button class="btn-settings" onclick="window.location='/launch.html'" title="Individual models">Individual models</button>
+    </header>
+
+    <main class="triplet">
+        <div class="triplet-header">
+            <div class="triplet-intro">
+                <p>The three resident models OS8 expects. Start brings them all up in sequence; Stop tears them down.</p>
+            </div>
+            <div class="role-rows" id="role-rows">Loading…</div>
+            <div class="triplet-actions">
+                <button id="btn-start" class="btn btn-primary" onclick="startTriplet()">Start triplet</button>
+                <button id="btn-stop" class="btn btn-danger" onclick="stopTriplet()" disabled>Stop triplet</button>
+            </div>
+        </div>
+        <div class="triplet-logs">
+            <h2 style="font-size:0.9rem;text-transform:uppercase;letter-spacing:0.05em;color:#888;margin-bottom:0.5rem;padding-bottom:0.5rem;border-bottom:1px solid #2a2a4a">Startup log</h2>
+            <pre id="triplet-log-pane"></pre>
+        </div>
+    </main>
+
+    <script>
+        const API = '/api';
+        const POLL_INTERVAL = 3000;
+
+        let cfg = null;
+        let startRequested = sessionStorage.getItem('triplet-start-requested') === '1';
+        let statusData = { backends: [] };
+
+        async function loadConfig() {
+            try {
+                cfg = await (await fetch(API + '/config')).json();
+            } catch (e) { /* keep cfg null; render will show loading */ }
+        }
+
+        function roleState(role) {
+            // Derive one of: idle | starting | ready | failed.
+            // `failed` is only set by an explicit failure path in /api/logs;
+            // we don't try to guess it from timing here.
+            if (!cfg) return 'idle';
+            const rc = cfg.roles[role];
+            if (!rc) return 'idle';
+            const inst = (statusData.backends || []).find(
+                b => b.model === rc.model && b.name === rc.backend,
+            );
+            if (inst) {
+                return inst.health === 'healthy' ? 'ready' : 'starting';
+            }
+            return startRequested ? 'starting' : 'idle';
+        }
+
+        function renderRoles() {
+            const container = document.getElementById('role-rows');
+            if (!cfg) return;
+            const roles = cfg.resident || [];
+            if (!roles.length) {
+                container.innerHTML = '<div class="nothing-running">No resident roles configured in config.yaml.</div>';
+                return;
+            }
+            const rows = [];
+            for (const role of roles) {
+                const rc = cfg.roles[role];
+                if (!rc) {
+                    rows.push(`<div class="role-row"><span class="role-name">${role}</span><span class="role-model muted">(unknown role)</span><span></span><span></span></div>`);
+                    continue;
+                }
+                const model = (cfg.models || {})[rc.model] || {};
+                const sizeText = model.size_gb ? `${model.size_gb} GB` : '';
+                const state = roleState(role);
+                const stateLabel = {
+                    idle: 'not running',
+                    starting: 'starting…',
+                    ready: 'ready ✓',
+                    failed: 'failed ✗',
+                }[state];
+                const inst = (statusData.backends || []).find(
+                    b => b.model === rc.model && b.name === rc.backend,
+                );
+                const urlLine = (state === 'ready' && inst)
+                    ? `<span class="triplet-url"><a href="http://localhost:${inst.port}" target="_blank">:${inst.port}</a></span>`
+                    : `<span></span>`;
+                rows.push(`
+                    <div class="role-row">
+                        <span class="role-name">${role}</span>
+                        <span class="role-model">${rc.model} <span class="role-size">${sizeText}</span></span>
+                        ${urlLine}
+                        <span class="role-state state-${state}">${stateLabel}</span>
+                    </div>
+                `);
+            }
+            container.innerHTML = rows.join('');
+        }
+
+        function updateButtons() {
+            const anyRunning = (statusData.backends || []).some(b => b.resident);
+            const anyHealthy = (statusData.backends || []).some(b => b.resident && b.health === 'healthy');
+            const startBtn = document.getElementById('btn-start');
+            const stopBtn = document.getElementById('btn-stop');
+            // Start is available only when nothing resident is running AND we
+            // aren't mid-start. Otherwise the user could double-fire and
+            // second call would race ensure_backend's per-instance guard.
+            startBtn.disabled = anyRunning || startRequested;
+            startBtn.textContent = startRequested && !anyRunning ? 'Starting…' : 'Start triplet';
+            stopBtn.disabled = !anyRunning && !anyHealthy;
+        }
+
+        async function startTriplet() {
+            startRequested = true;
+            sessionStorage.setItem('triplet-start-requested', '1');
+            updateButtons();
+            renderRoles();
+            try {
+                await fetch(API + '/triplet/start', { method: 'POST' });
+            } catch (e) {
+                alert('Start failed: ' + (e.message || e));
+                startRequested = false;
+                sessionStorage.removeItem('triplet-start-requested');
+            }
+            setTimeout(pollStatus, 500);
+            setTimeout(pollLogs, 500);
+        }
+
+        async function stopTriplet() {
+            startRequested = false;
+            sessionStorage.removeItem('triplet-start-requested');
+            updateButtons();
+            try {
+                await fetch(API + '/triplet', { method: 'DELETE' });
+            } catch (e) {
+                alert('Stop failed: ' + (e.message || e));
+            }
+            setTimeout(pollStatus, 500);
+            setTimeout(pollLogs, 500);
+        }
+
+        async function pollStatus() {
+            try {
+                statusData = await (await fetch(API + '/status')).json();
+                // Clear the start-requested latch once every resident role is
+                // healthy — keeps the Start button sensible if the user
+                // navigates back here.
+                if (startRequested && cfg) {
+                    const roles = cfg.resident || [];
+                    const allReady = roles.every(r => roleState(r) === 'ready');
+                    if (allReady) {
+                        startRequested = false;
+                        sessionStorage.removeItem('triplet-start-requested');
+                    }
+                }
+                renderRoles();
+                updateButtons();
+            } catch (e) { /* ignore */ }
+        }
+
+        function escapeHtml(s) {
+            return s.replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+            }[c]));
+        }
+
+        async function pollLogs() {
+            try {
+                const lines = await (await fetch(API + '/logs')).json();
+                const pane = document.getElementById('triplet-log-pane');
+                const next = lines.join('\n');
+                if (pane.dataset.raw === next) return;
+                const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 20;
+                pane.textContent = next;
+                pane.dataset.raw = next;
+                if (atBottom) pane.scrollTop = pane.scrollHeight;
+            } catch (e) { /* ignore */ }
+        }
+
+        (async function init() {
+            await loadConfig();
+            renderRoles();
+            await pollStatus();
+            await pollLogs();
+            setInterval(pollStatus, POLL_INTERVAL);
+            setInterval(pollLogs, POLL_INTERVAL);
+        })();
+    </script>
+</body>
+</html>

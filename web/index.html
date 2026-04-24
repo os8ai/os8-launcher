@@ -5,112 +5,186 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>os8-launcher</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        main.chooser {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            background: #1a1a2e;
+        }
+        .chooser-inner {
+            max-width: 900px;
+            width: 100%;
+        }
+        .chooser-intro {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .chooser-intro h2 {
+            font-size: 1.4rem;
+            color: #e0e0e0;
+            border: none;
+            padding: 0;
+            margin-bottom: 0.5rem;
+            text-transform: none;
+            letter-spacing: 0;
+        }
+        .chooser-intro p {
+            color: #888;
+            font-size: 0.95rem;
+        }
+        .chooser-cards {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+        .chooser-card {
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 1.75rem;
+            cursor: pointer;
+            text-decoration: none;
+            color: inherit;
+            display: flex;
+            flex-direction: column;
+            transition: border-color 0.15s, transform 0.15s;
+        }
+        .chooser-card:hover {
+            border-color: #e94560;
+            transform: translateY(-2px);
+        }
+        .chooser-card .num {
+            font-size: 0.75rem;
+            color: #e94560;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            margin-bottom: 0.5rem;
+        }
+        .chooser-card h3 {
+            font-size: 1.1rem;
+            color: #e0e0e0;
+            margin: 0 0 0.75rem;
+            text-transform: none;
+            letter-spacing: 0;
+        }
+        .chooser-card p {
+            color: #aaa;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            margin-bottom: 1rem;
+            flex: 1;
+        }
+        .chooser-card .role-list {
+            font-size: 0.8rem;
+            color: #888;
+            font-family: monospace;
+            line-height: 1.7;
+        }
+        .chooser-card .role-list strong {
+            color: #4ecca3;
+            font-weight: 500;
+        }
+        .chooser-card .action {
+            margin-top: 1rem;
+            color: #e94560;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .chooser-status {
+            display: inline-block;
+            margin-left: 0.5rem;
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        .chooser-status.running {
+            background: rgba(78, 204, 163, 0.18);
+            color: #4ecca3;
+            border: 1px solid rgba(78, 204, 163, 0.5);
+        }
+        .chooser-status.partial {
+            background: rgba(243, 156, 18, 0.18);
+            color: #f39c12;
+            border: 1px solid rgba(243, 156, 18, 0.5);
+        }
+        @media (max-width: 700px) {
+            .chooser-cards { grid-template-columns: 1fr; }
+        }
+    </style>
 </head>
 <body>
     <header>
         <h1><a href="/" style="color:inherit;text-decoration:none">os8-launcher</a></h1>
         <span class="subtitle">local AI model management</span>
-        <span id="active-project-indicator" class="subtitle" style="margin-left:1em"></span>
-        <button class="btn-settings" onclick="window.location='/projects.html'" title="Switch project">Projects</button>
-        <button class="btn-settings" onclick="restartDashboard()" title="Restart this dashboard server">Restart</button>
-        <button class="btn-settings" onclick="stopDashboard()" title="Stop this dashboard server">Stop server</button>
-        <button class="btn-settings" onclick="openSettings()" title="Settings">Settings</button>
     </header>
 
-    <div id="settings-modal" class="modal" style="display:none">
-        <div class="modal-content modal-content-wide">
-            <div class="modal-header">
-                <h2>Settings</h2>
-                <button class="modal-close" onclick="closeSettings()">&times;</button>
+    <main class="chooser">
+        <div class="chooser-inner">
+            <div class="chooser-intro">
+                <h2>How would you like to start?</h2>
+                <p>Pick a starting point — you can always come back here.</p>
             </div>
-            <div class="modal-body">
-                <div class="tabs" id="settings-tabs">
-                    <button class="tab active" data-settings-tab="settings-keys">API Keys</button>
-                    <button class="tab" data-settings-tab="settings-ports">Ports</button>
-                </div>
-                <div id="settings-keys" class="settings-tab-content active">
-                    <div class="control-group">
-                        <label for="ngc-key-input">NVIDIA NGC API Key</label>
-                        <div class="key-row">
-                            <input type="password" id="ngc-key-input" placeholder="nvapi-...">
-                            <span id="ngc-status" class="key-status"></span>
-                        </div>
-                        <div class="key-help">Required for NIM containers. Get one at <a href="https://ngc.nvidia.com" target="_blank">ngc.nvidia.com</a></div>
-                    </div>
-                    <div class="control-group">
-                        <label for="hf-token-input">HuggingFace Token</label>
-                        <div class="key-row">
-                            <input type="password" id="hf-token-input" placeholder="hf_...">
-                            <span id="hf-status" class="key-status"></span>
-                        </div>
-                        <div class="key-help">Required for gated models. Get one at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co</a></div>
-                    </div>
-                </div>
-                <div id="settings-ports" class="settings-tab-content">
-                    <div class="key-help" style="margin-bottom:0.75rem">Ports used by each backend and client. Changes apply to the next start — already-running services keep their current port.</div>
-                    <div id="ports-table-wrap">Loading…</div>
-                </div>
-                <div class="control-actions" style="margin-top:1rem">
-                    <button class="btn btn-primary" onclick="saveSettings()">Save</button>
-                    <button class="btn" onclick="closeSettings()">Cancel</button>
-                </div>
+            <div class="chooser-cards">
+                <a class="chooser-card" href="/triplet.html">
+                    <div class="num">OPTION 1</div>
+                    <h3>Run chat, image, and voice<span id="triplet-badge"></span></h3>
+                    <p>Bring up the three resident models OS8 expects: text chat, image generation, and text-to-speech.</p>
+                    <div class="role-list" id="triplet-role-list">Loading…</div>
+                    <div class="action">Start triplet →</div>
+                </a>
+                <a class="chooser-card" href="/launch.html">
+                    <div class="num">OPTION 2</div>
+                    <h3>Select and run individual models</h3>
+                    <p>The full dashboard — pick any model, backend, and client, and start them one at a time.</p>
+                    <div class="role-list">&nbsp;</div>
+                    <div class="action">Open dashboard →</div>
+                </a>
             </div>
-        </div>
-    </div>
-
-    <main>
-        <div class="divider divider-v" id="divider-v"></div>
-        <div class="divider divider-h" id="divider-h"></div>
-        <div class="panel" id="panel-models">
-            <h2>Models &amp; Tools</h2>
-            <div class="tabs">
-                <button class="tab active" data-tab="tab-models">Models</button>
-                <button class="tab" data-tab="tab-backends">Backends</button>
-                <button class="tab" data-tab="tab-clients">Clients</button>
-            </div>
-            <div id="tab-models" class="tab-content active">
-                <div id="models-content">Loading...</div>
-            </div>
-            <div id="tab-backends" class="tab-content">
-                <div id="backends-content">Loading...</div>
-            </div>
-            <div id="tab-clients" class="tab-content">
-                <div id="clients-content">Loading...</div>
-            </div>
-        </div>
-
-        <div class="panel" id="panel-controls">
-            <h2>Launch Controls</h2>
-            <div class="control-group">
-                <label for="model-select">Model</label>
-                <select id="model-select"><option value="">-- select model --</option></select>
-            </div>
-            <div class="control-group">
-                <label for="backend-select">Backend</label>
-                <select id="backend-select"><option value="">-- default --</option></select>
-            </div>
-            <div class="control-group">
-                <label for="client-select">Client</label>
-                <select id="client-select"><option value="">-- none --</option></select>
-            </div>
-            <div class="control-actions">
-                <button id="btn-serve" class="btn btn-primary" onclick="startServe()">Serve</button>
-                <button id="btn-stop" class="btn btn-danger" onclick="stopServe()">Stop</button>
-            </div>
-            <div id="client-hint" class="client-hint" style="display:none"></div>
-        </div>
-
-        <div class="panel" id="panel-session">
-            <h2>Active Session</h2>
-            <div id="session-content">Loading...</div>
-        </div>
-
-        <div class="panel" id="panel-logs">
-            <h2>Logs</h2>
-            <pre id="log-output"></pre>
         </div>
     </main>
 
-    <script src="app.js"></script>
+    <script>
+        (async function () {
+            // Show which roles the triplet covers, with current running state.
+            let config, status;
+            try {
+                [config, status] = await Promise.all([
+                    fetch('/api/config').then(r => r.json()),
+                    fetch('/api/status').then(r => r.json()),
+                ]);
+            } catch (e) {
+                document.getElementById('triplet-role-list').textContent = 'Config unavailable.';
+                return;
+            }
+            const roles = config.resident || [];
+            const roleMap = config.roles || {};
+            const running = {};
+            for (const b of status.backends || []) {
+                if (b.resident) running[b.model] = b.health;
+            }
+            const lines = [];
+            let healthyCount = 0;
+            for (const role of roles) {
+                const rc = roleMap[role];
+                if (!rc) continue;
+                const health = running[rc.model];
+                let mark = '·';
+                if (health === 'healthy') { mark = '✓'; healthyCount++; }
+                else if (health) mark = '…';
+                lines.push(`<strong>${mark}</strong> ${role} · ${rc.model}`);
+            }
+            document.getElementById('triplet-role-list').innerHTML = lines.join('<br>');
+            const badge = document.getElementById('triplet-badge');
+            if (roles.length && healthyCount === roles.length) {
+                badge.className = 'chooser-status running';
+                badge.textContent = 'running';
+            } else if (healthyCount > 0) {
+                badge.className = 'chooser-status partial';
+                badge.textContent = `${healthyCount}/${roles.length} up`;
+            }
+        })();
+    </script>
 </body>
 </html>

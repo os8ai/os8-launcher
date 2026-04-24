@@ -283,7 +283,7 @@ backends:
 resources:
   memory_budget_gb: 100
   kv_margin_gb: 10
-  auto_start_resident: true   # on startup, bring up every role in `resident:`
+  auto_start_resident: false  # user opts in via the dashboard's landing chooser (POST /api/triplet/start)
   auto_start_parallel: false  # serial by default — cold NVMe reads stampede at parallel start
 
 # Named roles referenced by the `resident:` list. The OS8 v2 plan uses

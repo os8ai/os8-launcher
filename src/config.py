@@ -356,6 +356,7 @@ def config_to_dict(config: Config) -> dict:
                 "backends": m.backends,
                 "default_backend": m.default_backend,
                 "nim_image": m.nim_image,
+                "size_gb": m.size_gb,
             }
             for name, m in config.models.items()
         },
@@ -374,6 +375,11 @@ def config_to_dict(config: Config) -> dict:
                 "install_type": c.manifest.install_type if c.manifest else None,
             }
             for name, c in config.clients.items()
+        },
+        "resident": list(config.resident),
+        "roles": {
+            name: {"model": r.model, "backend": r.backend}
+            for name, r in config.roles.items()
         },
     }
 
