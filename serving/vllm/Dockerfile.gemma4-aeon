@@ -1,0 +1,14 @@
+# Thin wrapper over os8-vllm:gemma4 for the AEON-7 NVFP4 quant of
+# Gemma 4 26B-A4B. Identical environment to gemma4-31B; the only addition
+# is an entrypoint that copies the model author's `gemma4_patched.py`
+# (shipped inside the weights repo) over vLLM's stock model loader before
+# `vllm serve` runs. Without that patch vLLM hits a KeyError on the
+# per-expert NVFP4 input_global_scale tensors at weight-load time.
+#
+# Once upstream vLLM grows native support for the AEON-7 weight layout,
+# this image and aeon7-entrypoint.sh can be deleted and the model entry
+# in config.yaml can drop its `vllm_image:` override.
+FROM os8-vllm:gemma4
+COPY aeon7-entrypoint.sh /usr/local/bin/aeon7-entrypoint.sh
+RUN chmod +x /usr/local/bin/aeon7-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/aeon7-entrypoint.sh"]

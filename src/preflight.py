@@ -310,3 +310,270 @@ def run_checks(checks: list[tuple[str, tuple[bool, str]]]) -> bool:
             all_ok = False
 
     return all_ok
+
+
+# ---------------------------------------------------------------------------
+# Leftover survey — detects state from a previous run that could fight with
+# a new backend start. Read-only: never kills anything itself.
+# ---------------------------------------------------------------------------
+
+def _process_command(pid: int) -> str:
+    """Best-effort `cmdline` for a PID; returns a short description."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        return raw or f"pid {pid}"
+    except (FileNotFoundError, PermissionError, OSError):
+        return f"pid {pid}"
+
+
+def _port_holder(port: int) -> tuple[int, str] | None:
+    """Return (pid, command) of whatever process holds `port`, or None.
+
+    Tries `lsof` first (best info), falls back to `ss -tlnp`. Both are
+    standard on Ubuntu — the one-or-the-other path keeps the survey
+    working in stripped containers too.
+    """
+    if shutil.which("lsof"):
+        try:
+            r = subprocess.run(
+                ["lsof", "-iTCP:" + str(port), "-sTCP:LISTEN", "-Fpc"],
+                capture_output=True, text=True, timeout=5,
+            )
+            pid = None
+            cmd = ""
+            for line in r.stdout.splitlines():
+                if line.startswith("p") and line[1:].isdigit():
+                    pid = int(line[1:])
+                elif line.startswith("c"):
+                    cmd = line[1:]
+            if pid:
+                return pid, cmd or _process_command(pid)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    if shutil.which("ss"):
+        try:
+            r = subprocess.run(
+                ["ss", "-tlnpH", f"sport = :{port}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in r.stdout.splitlines():
+                # users:(("name",pid=NNN,fd=M))
+                idx = line.find("pid=")
+                if idx == -1:
+                    continue
+                tail = line[idx + 4:]
+                pid_str = ""
+                for ch in tail:
+                    if ch.isdigit():
+                        pid_str += ch
+                    else:
+                        break
+                if pid_str:
+                    pid = int(pid_str)
+                    return pid, _process_command(pid)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    return None
+
+
+def _list_os8_containers() -> list[dict]:
+    """All `os8-*` Docker containers (running or stopped)."""
+    if not shutil.which("docker"):
+        return []
+    try:
+        r = subprocess.run(
+            ["docker", "ps", "-a",
+             "--filter", "name=os8-",
+             "--format", "{{.Names}}\t{{.Status}}\t{{.ID}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    out: list[dict] = []
+    for line in r.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            out.append({"name": parts[0], "status": parts[1], "id": parts[2]})
+    return out
+
+
+def _gpu_processes() -> list[dict]:
+    """All processes with non-zero GPU memory, via nvidia-smi."""
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        r = subprocess.run(
+            ["nvidia-smi",
+             "--query-compute-apps=pid,used_memory,process_name",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    out: list[dict] = []
+    for line in r.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            mib = int(parts[1])
+        except ValueError:
+            continue
+        out.append({"pid": pid, "memory_mib": mib, "process_name": parts[2]})
+    return out
+
+
+def survey_leftovers(
+    target_ports: list[int] | None = None,
+    state_data: dict | None = None,
+    gpu_min_mib: int = 1024,
+) -> list[dict]:
+    """Read-only sweep for state from a previous launcher run that could
+    interfere with a new backend start.
+
+    Returns a list of finding dicts. Each finding has:
+      - kind: "stale_state" | "orphan_container" | "port_conflict" | "gpu_squatter"
+      - origin: "ours" (we tracked it) | "foreign" (something else)
+      - summary: short human-readable line
+      - action: structured payload the /api/leftovers/stop route can act on
+
+    Categorization rules:
+      - stale_state: an entry in state.yaml whose pid/container is dead or
+        a zombie. Always "ours". Safe to clear.
+      - orphan_container: an `os8-*` Docker container not referenced by
+        state. "Ours" by name, but not tracked.
+      - port_conflict: target_port is bound by some process. "Ours" iff
+        the holding pid matches a state entry; "foreign" otherwise.
+      - gpu_squatter: nvidia-smi reports a process holding >= gpu_min_mib
+        of GPU memory. "Ours" if it matches a state entry. "Foreign"
+        otherwise — never auto-stop, requires user confirm.
+    """
+    from src.state import (  # local import: state imports preflight indirectly
+        is_container_running, is_process_alive, validate_state,
+    )
+
+    if state_data is None:
+        state_data = validate_state()
+
+    findings: list[dict] = []
+    backends = (state_data.get("backends") or {})
+    tracked_pids = {int(b["pid"]) for b in backends.values() if b.get("pid")}
+    tracked_containers = {b.get("container_id") for b in backends.values() if b.get("container_id")}
+    tracked_container_names = {f"os8-{b['instance_id']}" for b in backends.values() if b.get("instance_id")}
+
+    # 1. stale_state — entries whose process or container has died but we
+    #    haven't reaped from state.yaml yet. validate_state() above will
+    #    have already removed cleanly-dead ones, but this catches anything
+    #    still hanging around (e.g. mid-write race).
+    for instance_id, entry in backends.items():
+        alive = False
+        if entry.get("container_id"):
+            alive = is_container_running(entry["container_id"])
+        elif entry.get("pid"):
+            alive = is_process_alive(int(entry["pid"]))
+        if not alive:
+            findings.append({
+                "kind": "stale_state",
+                "origin": "ours",
+                "summary": f"{instance_id} is in state.yaml but its process/container is dead",
+                "action": {"type": "clear_state", "instance_id": instance_id},
+            })
+
+    # 2. orphan_container — `os8-*` containers we didn't launch (or that
+    #    survived a launcher crash). Both stopped and running variants
+    #    count: a stopped one with the same name will block the next start.
+    for c in _list_os8_containers():
+        if c["name"] in tracked_container_names:
+            continue
+        if c["id"] in tracked_containers:
+            continue
+        findings.append({
+            "kind": "orphan_container",
+            "origin": "ours",
+            "summary": f"orphan container {c['name']} ({c['status']})",
+            "action": {"type": "remove_container", "name": c["name"], "id": c["id"]},
+        })
+
+    # 3. port_conflict — for each port we plan to bind, who has it?
+    for port in target_ports or []:
+        holder = _port_holder(port)
+        if holder is None:
+            continue
+        pid, cmd = holder
+        is_ours = pid in tracked_pids
+        findings.append({
+            "kind": "port_conflict",
+            "origin": "ours" if is_ours else "foreign",
+            "summary": (
+                f"port {port} held by {'our' if is_ours else 'foreign'} pid {pid} "
+                f"({cmd[:80]})"
+            ),
+            "action": {"type": "kill_pid", "pid": pid, "port": port, "cmd": cmd},
+        })
+
+    # 4. gpu_squatter — anything sitting on real GPU memory we don't track.
+    for proc in _gpu_processes():
+        if proc["memory_mib"] < gpu_min_mib:
+            continue
+        if proc["pid"] in tracked_pids:
+            continue
+        # Container processes show up under their root pid here; if it
+        # belongs to one of our tracked containers we want to skip.
+        # Best-effort: read /proc/<pid>/cgroup and look for our container ids.
+        ours_via_container = False
+        try:
+            with open(f"/proc/{proc['pid']}/cgroup") as f:
+                cg = f.read()
+            for cid in tracked_containers:
+                if cid and cid[:12] in cg:
+                    ours_via_container = True
+                    break
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
+        if ours_via_container:
+            continue
+        findings.append({
+            "kind": "gpu_squatter",
+            "origin": "foreign",
+            "summary": (
+                f"foreign pid {proc['pid']} ({proc['process_name']}) holds "
+                f"{proc['memory_mib']} MiB GPU memory"
+            ),
+            "action": {
+                "type": "kill_pid",
+                "pid": proc["pid"],
+                "memory_mib": proc["memory_mib"],
+                "cmd": proc["process_name"],
+            },
+        })
+
+    return findings
+
+
+def format_findings(findings: list[dict]) -> str:
+    """Pretty-print findings for CLI output. One line per finding, grouped."""
+    if not findings:
+        return ""
+    lines = []
+    by_kind: dict[str, list[dict]] = {}
+    for f in findings:
+        by_kind.setdefault(f["kind"], []).append(f)
+    order = ["stale_state", "orphan_container", "port_conflict", "gpu_squatter"]
+    headers = {
+        "stale_state": "Stale state entries (ours):",
+        "orphan_container": "Orphan os8-* containers (ours):",
+        "port_conflict": "Port conflicts:",
+        "gpu_squatter": "Foreign GPU memory holders:",
+    }
+    for kind in order:
+        if kind not in by_kind:
+            continue
+        lines.append(headers[kind])
+        for f in by_kind[kind]:
+            tag = "" if f["origin"] == "ours" else " [FOREIGN]"
+            lines.append(f"  - {f['summary']}{tag}")
+    return "\n".join(lines)

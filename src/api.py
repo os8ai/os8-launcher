@@ -16,11 +16,13 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src.config import load_config, config_to_dict, ConfigError
+from src.config import load_config, config_to_dict, ConfigError, resolve_role
 from src.backends import (
     start_backend, stop_backend, stop_all,
     get_status_data, get_capabilities_data, ensure_backend, BackendError,
+    LeftoversFound, act_on_leftover,
 )
+from src.preflight import survey_leftovers
 from src.state import touch_backend
 from src.clients import start_client, stop_client, ClientError
 from src.runtime import serve_combo
@@ -115,7 +117,7 @@ def startup():
         ).start()
 
 
-def _auto_start_resident_set(config, repo_root: Path):
+def _auto_start_resident_set(config, repo_root: Path, skip_leftover_check: bool = False):
     """Walk config.resident and ensure each role is up.
 
     Runs off the uvicorn startup path, so a slow or failing model doesn't
@@ -123,6 +125,11 @@ def _auto_start_resident_set(config, repo_root: Path):
     auto_start_parallel flips to concurrent (starts via threads). Sorted
     biggest-first so the largest claim on the budget goes through before
     smaller siblings eat up headroom.
+
+    `skip_leftover_check=True` is set by `/api/triplet/start` when the
+    user has already acknowledged any leftover findings via the dialog.
+    The launcher startup auto-start path leaves it False so a leftover
+    from a previous crash gets reported on the boot logs.
     """
     roles = config.resident
     role_map = config.roles
@@ -131,39 +138,55 @@ def _auto_start_resident_set(config, repo_root: Path):
         print(f"  (resident auto-start: unknown roles skipped: {unknown})")
 
     targets = []
+    target_ports: list[int] = []
     for role in roles:
-        rc = role_map.get(role)
-        if not rc:
+        if role not in role_map:
             continue
         try:
-            model = config.get_model(rc.model)
+            model_name, backend_name = resolve_role(config, role)
+            model = config.get_model(model_name)
+            backend = config.get_backend(backend_name or model.default_backend)
         except ConfigError as e:
-            print(f"  (resident auto-start: role '{role}' → unknown model '{rc.model}': {e})")
+            print(f"  (resident auto-start: role '{role}' → {e})")
             continue
-        targets.append((role, rc, float(model.size_gb or 0)))
-    targets.sort(key=lambda t: t[2], reverse=True)  # biggest first
+        targets.append((role, model_name, backend_name, float(model.size_gb or 0)))
+        if backend.port:
+            target_ports.append(backend.port)
+    targets.sort(key=lambda t: t[3], reverse=True)  # biggest first
 
-    def _run(role: str, rc):
-        print(f"  (resident auto-start: bringing up {role} → {rc.model})")
+    if not skip_leftover_check:
+        findings = survey_leftovers(target_ports=target_ports)
+        if findings:
+            from src.preflight import format_findings
+            print(f"  (resident auto-start: aborting — leftover state detected:)")
+            for line in format_findings(findings).splitlines():
+                print(f"    {line}")
+            print("  (resident auto-start: review and clear via the dashboard, "
+                  "then call POST /api/triplet/start)")
+            return
+
+    def _run(role: str, model_name: str, backend_name: str):
+        print(f"  (resident auto-start: bringing up {role} → {model_name})")
         try:
             ensure_backend(
-                rc.model, rc.backend, config, repo_root,
+                model_name, backend_name, config, repo_root,
                 wait=True, resident=True,
+                skip_leftover_check=True,
             )
         except BackendError as e:
             print(f"  (resident auto-start: {role} failed: {e})")
 
     if config.resources.auto_start_parallel:
         threads = []
-        for role, rc, _ in targets:
-            t = threading.Thread(target=_run, args=(role, rc), daemon=True)
+        for role, model_name, backend_name, _ in targets:
+            t = threading.Thread(target=_run, args=(role, model_name, backend_name), daemon=True)
             t.start()
             threads.append(t)
         for t in threads:
             t.join()
     else:
-        for role, rc, _ in targets:
-            _run(role, rc)
+        for role, model_name, backend_name, _ in targets:
+            _run(role, model_name, backend_name)
 
 
 # Guards the config-reload critical section against concurrent requests
@@ -278,6 +301,11 @@ class PortsSaveRequest(BaseModel):
 
 class PortsResetRequest(BaseModel):
     name: str
+
+
+class RoleSelectRequest(BaseModel):
+    role: str
+    model: str
 
 
 # Services whose listening port isn't actually governed by config.yaml — for
@@ -497,6 +525,26 @@ def api_logs():
         return list(log_buffer)
 
 
+def clear_log_buffer():
+    """Empty the shared log buffer. Used by /api/logs/clear and by
+    callers that want a fresh slate before kicking off a workflow
+    (e.g. the triplet Start / Restart actions in the dashboard)."""
+    with _log_lock:
+        log_buffer.clear()
+
+
+@app.post("/api/logs/clear")
+def api_logs_clear():
+    """Empty the shared log buffer.
+
+    Called by the dashboard before a fresh-start workflow so the user
+    sees only output from the run they're about to kick off, not stale
+    chatter from a previous attempt.
+    """
+    clear_log_buffer()
+    return {"status": "cleared"}
+
+
 # --- Mutation endpoints ---
 
 @app.post("/api/serve")
@@ -561,12 +609,23 @@ def api_serve_ensure(req: ServeEnsureRequest, background_tasks: BackgroundTasks)
             schedule_start=_schedule,
             resident=req.resident,
         )
+    except LeftoversFound as e:
+        # Surface findings as 409 with structured body so the dashboard
+        # can render the leftover dialog and offer per-item Stop buttons.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "LEFTOVERS_FOUND",
+                "message": str(e),
+                "findings": e.findings,
+            },
+        )
     except BackendError as e:
         # Map the error code to an HTTP status so OS8 can branch on it:
         # 409 for admission-side rejections (budget), 500 for transient
         # start failures. Fallback to START_FAILED when uncoded.
         code = e.code or "START_FAILED"
-        status = 409 if code == "BUDGET_EXCEEDED" else 500
+        status = 409 if code in ("BUDGET_EXCEEDED", "RAM_FLOOR") else 500
         raise HTTPException(status_code=status, detail={"code": code, "message": str(e)})
     return result
 
@@ -582,22 +641,232 @@ def api_serve_touch(req: ServeTouchRequest):
     return {"touched": touched}
 
 
+class TripletStartRequest(BaseModel):
+    # When False (default), the route runs survey_leftovers first and
+    # returns 409 if anything is found. The caller (dashboard) then
+    # presents a dialog and re-issues with force=True after the user
+    # has acknowledged or cleared the leftovers via /api/leftovers/stop.
+    force: bool = False
+
+
 @app.post("/api/triplet/start")
-def api_triplet_start(background_tasks: BackgroundTasks):
+def api_triplet_start(background_tasks: BackgroundTasks, req: TripletStartRequest = TripletStartRequest()):
     """Bring up every role in config.resident (the OS8 chat/image/voice triplet).
 
     Reuses the same helper that used to run on dashboard startup (before
     auto_start_resident defaulted to false). Returns immediately; progress
     is visible via /api/status.
+
+    Returns 409 when survey_leftovers reports state from a previous run
+    (zombies, orphan containers, port/GPU squatters). The body has
+    `findings` so the dashboard can render a per-item dialog. Re-call
+    with `force: true` after the user clears or acknowledges them.
     """
     config = _config()
     if not config.resident:
         raise HTTPException(status_code=400, detail="No resident roles configured in config.yaml")
+
+    if not req.force:
+        target_ports: list[int] = []
+        for role in config.resident:
+            if role not in config.roles:
+                continue
+            try:
+                model_name, backend_name = resolve_role(config, role)
+                model = config.get_model(model_name)
+                backend = config.get_backend(backend_name or model.default_backend)
+                if backend.port:
+                    target_ports.append(backend.port)
+            except (ConfigError, Exception):
+                continue
+        findings = survey_leftovers(target_ports=target_ports)
+        if findings:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "LEFTOVERS_FOUND",
+                    "message": (
+                        f"{len(findings)} leftover item(s) from a previous run. "
+                        "Review and clear, then retry with force=true."
+                    ),
+                    "findings": findings,
+                },
+            )
+
     background_tasks.add_task(
         _run_with_log_capture,
-        _auto_start_resident_set, config, _repo_root(),
+        _auto_start_resident_set, config, _repo_root(), True,  # skip — already surveyed
     )
     return {"status": "starting", "roles": list(config.resident)}
+
+
+@app.get("/api/leftovers")
+def api_leftovers(ports: str = ""):
+    """Read-only survey of leftover state.
+
+    `ports` is an optional comma-separated list of ports to check for
+    conflicts (e.g. ?ports=8002,8188,8880). Always reports stale state,
+    orphan os8-* containers, and foreign GPU memory holders regardless
+    of `ports`.
+    """
+    target_ports: list[int] = []
+    if ports:
+        for chunk in ports.split(","):
+            chunk = chunk.strip()
+            if chunk.isdigit():
+                target_ports.append(int(chunk))
+    findings = survey_leftovers(target_ports=target_ports)
+    return {"findings": findings}
+
+
+class LeftoverStopRequest(BaseModel):
+    # Action payload comes straight from a finding's `action` dict.
+    # The dashboard echoes it back on Stop click — we don't trust the
+    # client to mint actions from scratch, but we do trust the survey
+    # we just gave it (the survey is read-only and runs server-side).
+    action: dict
+
+
+@app.post("/api/leftovers/stop")
+def api_leftovers_stop(req: LeftoverStopRequest):
+    """Execute one leftover-stop action. Idempotent on re-issue."""
+    result = act_on_leftover(req.action)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("detail") or "stop failed")
+    return result
+
+
+@app.get("/api/triplet/roles")
+def api_triplet_roles():
+    """Per-role: declared options, persisted selection, currently-running model.
+
+    Drives the launcher dashboard's chooser dropdown and OS8's read-only
+    "active chat model" display. Single-option roles (image-gen, tts) still
+    appear with a one-element `options` list — clients can ignore the
+    chooser for those.
+
+    Wire shape:
+      {
+        "<role>": {
+          "options": [{"model": ..., "backend": ..., "label": ...}, ...],
+          "default": "<model>",            # config.yaml default
+          "selected": "<model>",           # persisted selection or default
+          "running_model": "<model>"|null, # whichever option is currently up
+          "running_backend": "<name>"|null,
+          "running_health": "healthy"|...,
+          "needs_apply": bool              # selected != running_model and something is running
+        }
+      }
+    """
+    config = _config()
+    state = get_status_data()
+    out = {}
+    for role_name, rc in config.roles.items():
+        try:
+            selected_model, selected_backend = resolve_role(config, role_name)
+        except ConfigError:
+            continue
+        running = next(
+            (b for b in state.get("backends", [])
+             if b.get("resident") and any(o.model == b.get("model") for o in rc.options)),
+            None
+        )
+        running_model = running.get("model") if running else None
+        out[role_name] = {
+            "options": [
+                {"model": o.model, "backend": o.backend, "label": o.label}
+                for o in rc.options
+            ],
+            "default": rc.default,
+            "selected": selected_model,
+            "selected_backend": selected_backend,
+            "running_model": running_model,
+            "running_backend": running.get("name") if running else None,
+            "running_health": running.get("health") if running else None,
+            "needs_apply": bool(running_model and running_model != selected_model),
+        }
+    return out
+
+
+@app.post("/api/triplet/role")
+def api_triplet_role_set(req: RoleSelectRequest):
+    """Persist a role selection. Does NOT stop or start anything.
+
+    The launcher's dashboard renders a "Stop & Apply" button after this
+    call when the running model differs from the new selection. Until
+    that button fires /api/triplet/role/apply, the running instance keeps
+    serving the previous selection.
+    """
+    from src.settings import set_role_selection
+    config = _config()
+    rc = config.roles.get(req.role)
+    if not rc:
+        raise HTTPException(status_code=400, detail=f"Unknown role: {req.role}")
+    if not any(o.model == req.model for o in rc.options):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{req.model}' not in options for role '{req.role}'",
+        )
+    set_role_selection(req.role, req.model)
+    return {"role": req.role, "selected": req.model}
+
+
+@app.post("/api/triplet/role/apply")
+def api_triplet_role_apply(req: RoleSelectRequest, background_tasks: BackgroundTasks):
+    """Stop & Apply: stop the role's running instance and start the
+    persisted selection. Idempotent — if the right model is already
+    serving, returns `noop` without doing anything.
+
+    Defensive: if the caller's `model` differs from the persisted
+    selection (e.g. they skipped the /role POST), persists the new
+    selection first so a later restart matches the user's intent.
+    """
+    from src.settings import set_role_selection
+    config = _config()
+    rc = config.roles.get(req.role)
+    if not rc:
+        raise HTTPException(status_code=400, detail=f"Unknown role: {req.role}")
+    if not any(o.model == req.model for o in rc.options):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{req.model}' not in options for role '{req.role}'",
+        )
+
+    # Make sure the persisted selection matches the apply target so
+    # resolve_role on subsequent restarts agrees with what we just started.
+    set_role_selection(req.role, req.model)
+    target_model, target_backend = resolve_role(config, req.role)
+
+    state = get_status_data()
+    running = next(
+        (b for b in state.get("backends", [])
+         if b.get("resident") and any(o.model == b.get("model") for o in rc.options)),
+        None
+    )
+    if running and running.get("model") == target_model and running.get("health") == "healthy":
+        return {"status": "noop", "model": target_model}
+
+    if running:
+        background_tasks.add_task(
+            _run_with_log_capture, stop_backend, running["instance_id"],
+        )
+
+    def _ensure():
+        try:
+            ensure_backend(
+                target_model, target_backend, _config(), _repo_root(),
+                wait=True, resident=True,
+            )
+        except BackendError as e:
+            print(f"  (apply {req.role} → {target_model}: {e})")
+
+    background_tasks.add_task(_run_with_log_capture, _ensure)
+    return {
+        "status": "applying",
+        "role": req.role,
+        "model": target_model,
+        "stopped_instance": running["instance_id"] if running else None,
+    }
 
 
 @app.delete("/api/triplet")

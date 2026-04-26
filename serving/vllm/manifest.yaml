@@ -13,6 +13,8 @@ image_builds:
     dockerfile: Dockerfile.gemma4
   os8-vllm:qwen36:
     dockerfile: Dockerfile.qwen36
+  os8-vllm:gemma4-aeon:
+    dockerfile: Dockerfile.gemma4-aeon
 
 # vLLM can pull gated models from HF on first serve; token is optional.
 credentials:

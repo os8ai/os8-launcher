@@ -268,8 +268,9 @@ def main(repo_root: Path):
 
     # --- serve ---
     if handler == "serve":
-        from src.backends import BackendError
+        from src.backends import BackendError, LeftoversFound, act_on_leftover
         from src.clients import ClientError
+        from src.preflight import format_findings
         from src.runtime import serve_combo
         try:
             config = load_config(repo_root)
@@ -280,13 +281,50 @@ def main(repo_root: Path):
                 config.get_backend(args.backend)
             if getattr(args, "client", None):
                 config.get_client(args.client)
-            serve_combo(
-                args.model,
-                getattr(args, "backend", None),
-                getattr(args, "client", None),
-                config,
-                repo_root,
-            )
+            try:
+                serve_combo(
+                    args.model,
+                    getattr(args, "backend", None),
+                    getattr(args, "client", None),
+                    config,
+                    repo_root,
+                )
+            except LeftoversFound as e:
+                # Show findings, ask once, then either stop them and retry
+                # or bail out. Foreign-origin items get a louder warning.
+                print("Leftover state from a previous run was detected:", file=sys.stderr)
+                print(format_findings(e.findings), file=sys.stderr)
+                has_foreign = any(f.get("origin") == "foreign" for f in e.findings)
+                if has_foreign:
+                    print("\nWARNING: some items are foreign processes (not started by the launcher).",
+                          file=sys.stderr)
+                    print("Stopping them may interrupt other work on this machine.",
+                          file=sys.stderr)
+                try:
+                    answer = input(
+                        f"\nStop {len(e.findings)} item(s) and proceed? "
+                        f"[{'y/N' if has_foreign else 'Y/n'}] "
+                    ).strip().lower()
+                except EOFError:
+                    answer = ""
+                default_yes = not has_foreign
+                proceed = (answer in ("y", "yes")) if not default_yes else (answer not in ("n", "no") if answer else True)
+                if not proceed:
+                    print("Aborted.", file=sys.stderr)
+                    sys.exit(1)
+                for finding in e.findings:
+                    result = act_on_leftover(finding["action"])
+                    status = "OK" if result.get("ok") else "FAIL"
+                    print(f"  [{status}] {result.get('detail', '')}", file=sys.stderr)
+                # Retry once. The survey will run again inside ensure/start;
+                # if anything new appeared in the meantime it will surface.
+                serve_combo(
+                    args.model,
+                    getattr(args, "backend", None),
+                    getattr(args, "client", None),
+                    config,
+                    repo_root,
+                )
         except (ConfigError, BackendError, ClientError, KeyboardInterrupt) as e:
             if isinstance(e, KeyboardInterrupt):
                 print("\nAborted.")

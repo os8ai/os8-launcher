@@ -109,6 +109,7 @@ def set_backend(
     health_path: str = "/v1/models",
     instance_id: str | None = None,
     size_gb: float | None = None,
+    effective_size_gb: float | None = None,
     resident: bool = False,
 ):
     """Record a running backend in state.
@@ -117,10 +118,12 @@ def set_backend(
     multi-instance key under state["backends"]; defaults to the
     deterministic (backend, model) pair when omitted.
 
-    `size_gb` is the model's declared weights size — used by admission
-    accounting to decide whether to evict siblings for a new start.
-    `resident` marks an instance as pinned by config.yaml's `resident:`
-    list — these are never picked as LRU eviction victims.
+    `size_gb` is the model's declared weights size. `effective_size_gb`
+    is the admission-accounting weight (often larger than size_gb because
+    backends like vLLM pre-allocate KV cache to a fraction of GPU memory).
+    Persisted so subsequent admissions see the real footprint. `resident`
+    marks an instance as pinned by config.yaml's `resident:` list —
+    these are never picked as LRU eviction victims.
     """
     instance_id = instance_id or compute_instance_id(name, model)
     data = load_state()
@@ -135,6 +138,7 @@ def set_backend(
         "install_type": install_type,
         "health_path": health_path,
         "size_gb": size_gb,
+        "effective_size_gb": effective_size_gb,
         "resident": resident,
         "start_time": datetime.now().isoformat(),
     }
@@ -249,12 +253,38 @@ def clear_all():
 
 
 def is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is alive."""
+    """Check if a process with the given PID is alive AND not a zombie.
+
+    `os.kill(pid, 0)` returns success for zombies — they still occupy a slot
+    in the process table until their parent reaps them. That's not "alive"
+    for our purposes: a zombie backend has crashed and its port/GPU memory
+    is already released. Read /proc/<pid>/status and treat State:Z as dead.
+
+    Also opportunistically reap dead children: if the PID is one of OUR
+    children (waitpid succeeds), pull it out of the process table so it
+    doesn't linger as a zombie indefinitely.
+    """
     try:
         os.kill(pid, 0)
-        return True
     except (OSError, ProcessLookupError):
         return False
+
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    state_char = line.split()[1] if len(line.split()) > 1 else ""
+                    if state_char == "Z":
+                        try:
+                            os.waitpid(pid, os.WNOHANG)
+                        except (OSError, ChildProcessError):
+                            pass
+                        return False
+                    break
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    return True
 
 
 def is_container_running(container_id: str) -> bool:

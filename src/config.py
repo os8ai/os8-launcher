@@ -37,6 +37,14 @@ class ModelConfig:
     # download.image_field, which also gates the auto-pull at start time.
     vllm_image: str | None = None
     size_gb: float | None = None
+    # Optional override of the admission accounting weight. When unset, the
+    # admission code derives an effective size from `--gpu-memory-utilization`
+    # in backend_args (vLLM-style: it pre-allocates that fraction of GPU
+    # memory, which on unified-memory boxes is also RAM the OS won't get
+    # back). Set this explicitly when the derivation is wrong (e.g. a
+    # backend that respects `size_gb` exactly, or a model whose KV cache
+    # genuinely needs more than the default heuristic gives).
+    effective_size_gb: float | None = None
     backend_env: dict[str, str] = field(default_factory=dict)
     backend_args: str = ""
     allow_patterns: list[str] | None = None
@@ -86,20 +94,55 @@ class ResourcesConfig:
 
     `kv_margin_gb` is a flat per-instance reservation for KV cache +
     launcher/docker overhead that model.size_gb doesn't capture.
+
+    `ram_safety_floor_gb` is a second admission gate, checked against
+    live `MemAvailable` from /proc/meminfo. The budget is a static cap;
+    this catches the case where the math says yes but the OS disagrees
+    (other apps using RAM, kernel reclaim already underway, etc.).
     """
     memory_budget_gb: float = 100.0
     kv_margin_gb: float = 10.0
+    ram_safety_floor_gb: float = 4.0
     auto_start_resident: bool = True
     auto_start_parallel: bool = False
 
 
 @dataclass
-class RoleConfig:
-    """A named role (chat, coder, tts, …) and the (model, backend) it
-    resolves to. The `resident:` list references role names, so swapping
-    the model for a role doesn't require editing `resident:` too."""
+class RoleOption:
+    """One candidate (model, backend) pair for a role. Roles can declare
+    multiple options so the launcher dashboard can offer a chooser. `label`
+    is the user-facing string rendered in the dropdown; falls back to the
+    model name when omitted."""
     model: str
     backend: str | None = None
+    label: str | None = None
+
+
+@dataclass
+class RoleConfig:
+    """A named role (chat, coder, tts, …) and the candidate (model, backend)
+    pairs that can fill it. Single-option roles match the legacy shape:
+    `chat: {model: ..., backend: ...}` parses into a one-element `options`
+    list with `default = model`. Multi-option roles use the explicit form:
+    `chat: {options: [{...}, {...}], default: <model>}`. The `resident:`
+    list references role names, so swapping the model for a role doesn't
+    require editing `resident:` too. Use `resolve_role()` to apply any
+    user-persisted selection on top of `default`."""
+    options: list[RoleOption]
+    default: str
+
+    @property
+    def model(self) -> str:
+        """First-option convenience for callers that don't care about the
+        chooser (legacy/single-option access)."""
+        return self.default
+
+    @property
+    def backend(self) -> str | None:
+        for o in self.options:
+            if o.model == self.default:
+                return o.backend
+        return self.options[0].backend if self.options else None
 
 
 @dataclass
@@ -130,6 +173,31 @@ class Config:
     def get_backends_for_model(self, name: str) -> list[BackendConfig]:
         model = self.get_model(name)
         return [self.backends[b] for b in model.backends]
+
+
+def resolve_role(config: "Config", role_name: str) -> tuple[str, str]:
+    """Return the (model, backend) currently active for `role_name`.
+
+    Applies any user-persisted selection (settings.yaml::role_selections)
+    on top of the role's `default`. Falls back to the role's first option
+    when the selection points to a model that's no longer in the option
+    list (e.g. the user removed it from config.yaml).
+
+    The returned backend is either the option's explicit `backend:` or, if
+    omitted, the model's `default_backend` from config.yaml.
+    """
+    if role_name not in config.roles:
+        raise ConfigError(f"Unknown role: {role_name}")
+    rc = config.roles[role_name]
+    # Lazy import to avoid a config <-> settings cycle at module load.
+    from src.settings import get_role_selection
+    selected = get_role_selection(role_name) or rc.default
+    opt = next((o for o in rc.options if o.model == selected), rc.options[0])
+    backend = opt.backend
+    if not backend:
+        model = config.get_model(opt.model)
+        backend = model.default_backend
+    return opt.model, backend
 
 
 def _load_manifest(path: Path) -> ManifestConfig:
@@ -178,6 +246,7 @@ def _parse_models(raw: dict) -> dict[str, ModelConfig]:
             ollama_tag=data.get("ollama_tag"),
             vllm_image=data.get("vllm_image"),
             size_gb=data.get("size_gb"),
+            effective_size_gb=data.get("effective_size_gb"),
             backend_env=data.get("backend_env") or {},
             backend_args=data.get("backend_args", ""),
             allow_patterns=data.get("allow_patterns"),
@@ -326,6 +395,7 @@ def _parse_resources(raw: dict) -> ResourcesConfig:
     return ResourcesConfig(
         memory_budget_gb=float(raw.get("memory_budget_gb", defaults.memory_budget_gb)),
         kv_margin_gb=float(raw.get("kv_margin_gb", defaults.kv_margin_gb)),
+        ram_safety_floor_gb=float(raw.get("ram_safety_floor_gb", defaults.ram_safety_floor_gb)),
         auto_start_resident=bool(raw.get("auto_start_resident", defaults.auto_start_resident)),
         auto_start_parallel=bool(raw.get("auto_start_parallel", defaults.auto_start_parallel)),
     )
@@ -333,15 +403,46 @@ def _parse_resources(raw: dict) -> ResourcesConfig:
 
 def _parse_roles(raw: dict) -> dict[str, RoleConfig]:
     """Parse the optional `roles:` section. Missing is fine — resident:
-    entries for unknown roles are silently skipped at auto-start."""
+    entries for unknown roles are silently skipped at auto-start.
+
+    Two shapes accepted:
+      legacy single-option:
+        chat: {model: <name>, backend: <name?>}
+      multi-option (chooser):
+        chat: {options: [{model,backend?,label?}, ...], default: <model>}
+    Single-option configs become a one-element options list; the chooser
+    shape requires every option to declare a model and `default` must match
+    one of the options."""
     out: dict[str, RoleConfig] = {}
     for name, data in raw.items():
         if not isinstance(data, dict):
             continue
-        model = data.get("model")
-        if not model:
-            continue
-        out[name] = RoleConfig(model=model, backend=data.get("backend"))
+        if "options" in data:
+            opts_raw = data.get("options") or []
+            options: list[RoleOption] = []
+            for o in opts_raw:
+                if not isinstance(o, dict) or not o.get("model"):
+                    continue
+                options.append(RoleOption(
+                    model=o["model"],
+                    backend=o.get("backend"),
+                    label=o.get("label"),
+                ))
+            if not options:
+                continue
+            default = data.get("default") or options[0].model
+            if not any(o.model == default for o in options):
+                # Bad default — fall back to first option rather than crashing
+                default = options[0].model
+            out[name] = RoleConfig(options=options, default=default)
+        else:
+            model = data.get("model")
+            if not model:
+                continue
+            out[name] = RoleConfig(
+                options=[RoleOption(model=model, backend=data.get("backend"))],
+                default=model,
+            )
     return out
 
 
@@ -378,7 +479,15 @@ def config_to_dict(config: Config) -> dict:
         },
         "resident": list(config.resident),
         "roles": {
-            name: {"model": r.model, "backend": r.backend}
+            name: {
+                "model": r.model,           # legacy single-value (= default)
+                "backend": r.backend,
+                "default": r.default,
+                "options": [
+                    {"model": o.model, "backend": o.backend, "label": o.label}
+                    for o in r.options
+                ],
+            }
             for name, r in config.roles.items()
         },
     }

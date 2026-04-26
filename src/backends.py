@@ -1,6 +1,7 @@
 """Backend lifecycle — start, stop, health-check, and status."""
 
 import os
+import re
 import signal
 import subprocess
 import time
@@ -18,6 +19,125 @@ from src.credentials import (
     get_ngc_key, prompt_ngc_key,
     get_hf_token, prompt_hf_token,
 )
+
+
+# Default output reserve returned alongside max_model_len in
+# /api/serve/ensure responses. vLLM's effective output cap depends on
+# runtime params (--max-num-seqs, batch composition) we don't model here;
+# 4K is a safe default for any client that wants to budget input vs. output
+# against the model's input window.
+_DEFAULT_OUTPUT_RESERVE = 4096
+
+
+_TOTAL_GPU_MEMORY_GB_CACHE: float | None = None
+
+
+def _total_gpu_memory_gb() -> float:
+    """Total GPU memory in GB, cached for the process lifetime.
+
+    On unified-memory hardware like the DGX Spark, nvidia-smi reports
+    memory.total as `[N/A]` (no dedicated VRAM). In that case we fall
+    back to /proc/meminfo's MemTotal — accurate, since the GPU is
+    sharing that exact pool with the CPU.
+
+    Falls back to 0.0 only when both lookups fail.
+    """
+    global _TOTAL_GPU_MEMORY_GB_CACHE
+    if _TOTAL_GPU_MEMORY_GB_CACHE is not None:
+        return _TOTAL_GPU_MEMORY_GB_CACHE
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            line = result.stdout.strip().split("\n")[0].strip()
+            if line and line != "[N/A]":
+                try:
+                    _TOTAL_GPU_MEMORY_GB_CACHE = float(line) / 1024.0
+                    return _TOTAL_GPU_MEMORY_GB_CACHE
+                except ValueError:
+                    pass
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Unified memory fallback — applies to Grace-Blackwell, Apple Silicon,
+    # and any system where nvidia-smi can't report dedicated VRAM.
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    kb = int(line.split()[1])
+                    _TOTAL_GPU_MEMORY_GB_CACHE = kb / (1024.0 * 1024.0)
+                    return _TOTAL_GPU_MEMORY_GB_CACHE
+    except (OSError, ValueError):
+        pass
+
+    _TOTAL_GPU_MEMORY_GB_CACHE = 0.0
+    return _TOTAL_GPU_MEMORY_GB_CACHE
+
+
+def _parse_gpu_memory_utilization(backend_args: str) -> float | None:
+    """Extract the float value of --gpu-memory-utilization from backend_args.
+
+    vLLM accepts both `--gpu-memory-utilization 0.6` and the `=` form.
+    Returns None when the flag is absent.
+    """
+    if not backend_args:
+        return None
+    m = re.search(r"--gpu-memory-utilization[\s=]([0-9]*\.?[0-9]+)", backend_args)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def compute_effective_size_gb(model) -> float:
+    """Admission-accounting weight for a model.
+
+    Priority:
+      1. Explicit `effective_size_gb` on the model — user override.
+      2. `--gpu-memory-utilization X` in backend_args, times total GPU
+         memory. vLLM pre-allocates this fraction up front for KV cache,
+         so on a unified-memory box that's also RAM the OS won't get back.
+         We take max(weights, fraction*total) — the larger of "what the
+         model declares" and "what the backend will actually grab".
+      3. Fall back to model.size_gb.
+
+    Returns 0.0 only when both size_gb and the derivation fail (no
+    nvidia-smi, no flag) — admission still works against the budget but
+    is effectively unguarded for that model.
+    """
+    if getattr(model, "effective_size_gb", None):
+        return float(model.effective_size_gb)
+    declared = float(getattr(model, "size_gb", None) or 0)
+    util = _parse_gpu_memory_utilization(getattr(model, "backend_args", "") or "")
+    if util is not None:
+        total_gb = _total_gpu_memory_gb()
+        if total_gb > 0:
+            return max(declared, util * total_gb)
+    return declared
+
+
+def _parse_max_model_len(backend_args: str) -> int | None:
+    """Extract the integer value of --max-model-len from a backend_args string.
+
+    Returns None when the flag is absent. Tolerates both `--max-model-len 65536`
+    and `--max-model-len=65536` forms. Backends that don't accept this flag
+    (e.g. ollama, llama.cpp without explicit window override) yield None and
+    callers should fall back to whatever the runtime defaults to.
+    """
+    if not backend_args:
+        return None
+    m = re.search(r"--max-model-len[\s=](\d+)", backend_args)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
 
 
 def _lookup_credential(name: str) -> str | None:
@@ -88,15 +208,21 @@ _ensure_lock = threading.Lock()
 
 
 def _is_configured_resident(config, model_name: str, backend_name: str) -> bool:
-    """True if this (model, backend) pair matches one of the roles in
+    """True if this (model, backend) pair matches any option of any role in
     `config.resident`. Used by ensure_backend to auto-promote user-driven
     ensures into resident pins when the user declared them resident in
     config.yaml — so a direct /api/serve/ensure for a configured resident
     doesn't accidentally become an eviction target for the next ensure.
 
-    Matches are strict: the role's model must equal `model_name`, and the
-    role's backend (if specified) must equal `backend_name`. A role whose
-    backend is None matches any backend for that model — same default-backend
+    Matches every option of every resident role (not just the currently-
+    selected one). That way the inactive options of a multi-option role
+    (e.g. AEON-7 when chat is set to Qwen) still get resident pinning when
+    a user spins them up via /api/serve/ensure — important because
+    /api/triplet/role/apply transiently loads the *new* selection while
+    the *old* one is being torn down.
+
+    Each option's backend is matched literally; an option with no explicit
+    `backend:` matches any backend for that model — same default-backend
     semantics as the rest of the launcher.
     """
     resident_roles = config.resident or []
@@ -105,10 +231,11 @@ def _is_configured_resident(config, model_name: str, backend_name: str) -> bool:
         role = roles.get(role_name)
         if not role:
             continue
-        if role.model != model_name:
-            continue
-        if role.backend is None or role.backend == backend_name:
-            return True
+        for opt in role.options:
+            if opt.model != model_name:
+                continue
+            if opt.backend is None or opt.backend == backend_name:
+                return True
     return False
 
 
@@ -127,6 +254,7 @@ _MODEL_ELIGIBILITY: dict[str, list[str]] = {
     "flux1-dev": ["image-gen"],
     "flux1-kontext-dev": ["image-edit"],
     "qwen3-6-35b-a3b": ["conversation", "vision"],
+    "aeon-7-gemma-4-26b": ["conversation", "summary", "planning", "coding", "jobs"],
 }
 
 
@@ -609,18 +737,119 @@ def _wait_for_healthy(
     )
 
 
+class LeftoversFound(BackendError):
+    """Raised when survey_leftovers() finds state from a previous run.
+
+    Carries the structured `findings` list so callers (CLI / API) can
+    decide how to surface it: CLI prompts, API returns 409 + JSON.
+    """
+    def __init__(self, findings: list, message: str | None = None):
+        super().__init__(message or "Leftover state detected", code="LEFTOVERS_FOUND")
+        self.findings = findings
+
+
+def act_on_leftover(action: dict) -> dict:
+    """Execute one leftover action returned by survey_leftovers().
+
+    Returns {"ok": bool, "detail": str}. Never raises — the caller is
+    typically iterating over multiple actions and wants to surface
+    per-item results.
+
+    Action types:
+      - clear_state: remove the named instance_id from state.yaml
+      - remove_container: `docker rm -f <id_or_name>`
+      - kill_pid: SIGTERM, then SIGKILL after a 2s grace period
+    """
+    kind = action.get("type")
+    try:
+        if kind == "clear_state":
+            instance_id = action.get("instance_id")
+            if not instance_id:
+                return {"ok": False, "detail": "missing instance_id"}
+            clear_backend(instance_id=instance_id)
+            return {"ok": True, "detail": f"cleared state entry {instance_id}"}
+
+        if kind == "remove_container":
+            target = action.get("name") or action.get("id")
+            if not target:
+                return {"ok": False, "detail": "missing name/id"}
+            r = subprocess.run(
+                ["docker", "rm", "-f", target],
+                capture_output=True, text=True, timeout=20,
+            )
+            if r.returncode == 0:
+                return {"ok": True, "detail": f"removed container {target}"}
+            return {"ok": False, "detail": (r.stderr or r.stdout).strip()}
+
+        if kind == "kill_pid":
+            pid = int(action.get("pid", 0))
+            if pid <= 1:
+                return {"ok": False, "detail": "refusing to signal pid <= 1"}
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return {"ok": True, "detail": f"pid {pid} already gone"}
+            except PermissionError:
+                return {"ok": False, "detail": f"no permission to signal pid {pid}"}
+            for _ in range(20):  # 2s grace
+                time.sleep(0.1)
+                if not is_process_alive(pid):
+                    return {"ok": True, "detail": f"sent SIGTERM, pid {pid} exited"}
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return {"ok": True, "detail": f"pid {pid} exited just before SIGKILL"}
+            except PermissionError:
+                return {"ok": False, "detail": f"no permission to SIGKILL pid {pid}"}
+            return {"ok": True, "detail": f"sent SIGKILL to pid {pid}"}
+
+        return {"ok": False, "detail": f"unknown action type: {kind}"}
+    except Exception as e:  # any unexpected failure surfaces back to the caller
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
+
+
+def survey_for_start(
+    config: Config,
+    target_ports: list[int] | None = None,
+) -> list[dict]:
+    """Convenience wrapper around preflight.survey_leftovers that knows
+    how to derive target ports from config when none are supplied.
+
+    With `target_ports=None`, the survey skips the port-conflict check —
+    use this when surveying generically (e.g. status endpoint). The
+    start paths pass the specific port(s) they're about to bind.
+    """
+    from src.preflight import survey_leftovers
+    return survey_leftovers(target_ports=target_ports or [])
+
+
 def start_backend(
     model_name: str,
     backend_name: str | None,
     config: Config,
     repo_root: Path,
     resident: bool = False,
+    skip_leftover_check: bool = False,
 ):
     """Start a serving backend for the given model.
 
     `resident=True` persists a flag on the state entry so the instance
     is exempt from LRU eviction. Used by the resident-set auto-start.
+
+    `skip_leftover_check=True` bypasses the survey_for_start gate. The
+    triplet auto-start uses this — it runs ONE survey at the top and
+    handles findings itself, rather than re-running per role.
     """
+    if not skip_leftover_check:
+        try:
+            backend = config.get_backend(backend_name or config.get_model(model_name).default_backend)
+            target_port = backend.port
+        except Exception:
+            target_port = None
+        findings = survey_for_start(config, target_ports=[target_port] if target_port else None)
+        if findings:
+            raise LeftoversFound(findings)
+
     log_start("backend", f"{backend_name or '?'} for {model_name}")
     try:
         _start_backend_inner(model_name, backend_name, config, repo_root, resident=resident)
@@ -823,6 +1052,7 @@ def _start_backend_inner(
         health_path=health_path,
         instance_id=instance_id,
         size_gb=model.size_gb,
+        effective_size_gb=compute_effective_size_gb(model),
         resident=resident,
     )
 
@@ -1028,8 +1258,22 @@ def _check_health(port: int, health_path: str = "/v1/models") -> str:
 _starting_instances: dict[str, float] = {}
 
 
+def _entry_accounting_size(entry: dict) -> float:
+    """Pull the right size field off a state entry for admission accounting.
+
+    Prefers the persisted `effective_size_gb` (set by start_backend after
+    deriving from `--gpu-memory-utilization`). Falls back to declared
+    `size_gb` for entries written by an older launcher.
+    """
+    eff = entry.get("effective_size_gb")
+    if eff is not None:
+        return float(eff)
+    return float(entry.get("size_gb") or 0)
+
+
 def _reserved_gb(state_data: dict, kv_margin: float) -> float:
-    """Sum (size_gb + kv_margin) over every running AND pending instance.
+    """Sum (effective_size_gb + kv_margin) over every running AND pending
+    instance.
 
     An instance is added to `_starting_instances` at admission time and
     removed only when the start fully completes (~90s for vLLM). Between
@@ -1042,12 +1286,24 @@ def _reserved_gb(state_data: dict, kv_margin: float) -> float:
     backends = state_data.get("backends") or {}
     total = 0.0
     for entry in backends.values():
-        total += float(entry.get("size_gb") or 0) + kv_margin
+        total += _entry_accounting_size(entry) + kv_margin
     for instance_id, size in _starting_instances.items():
         if instance_id in backends:
             continue  # already counted via state
         total += float(size) + kv_margin
     return total
+
+
+def _live_mem_available_gb() -> float:
+    """Live MemAvailable from /proc/meminfo, in GB. 0.0 if unreadable."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / (1024.0 * 1024.0)
+    except (OSError, ValueError):
+        pass
+    return 0.0
 
 
 def _admit_or_evict(
@@ -1060,6 +1316,20 @@ def _admit_or_evict(
     of evicted instance_ids (empty if the admission fit without
     eviction) — the caller can surface it to the user.
 
+    Two gates run in order:
+
+      1. Static budget — sum(effective_size_gb + kv_margin) over all
+         running + pending instances must stay under
+         resources.memory_budget_gb. Eviction can free room here.
+
+      2. Live RAM floor — `MemAvailable` from /proc/meminfo must remain
+         at least `ram_safety_floor_gb` above the new instance's
+         effective size after admission. This catches the case where
+         the static math says yes but the OS is already squeezed
+         (other apps, kernel caches, GPU memory we didn't track).
+         Eviction CAN help here too — freeing a sibling drops their
+         held memory back to the OS.
+
     Candidates for eviction: running non-resident instances that aren't
     already mid-stop. A pending `_starting_instances` entry is never
     evicted (nothing to stop yet) and contributes its size to the
@@ -1067,40 +1337,71 @@ def _admit_or_evict(
     """
     budget = resources.memory_budget_gb
     kv_margin = resources.kv_margin_gb
+    floor = float(getattr(resources, "ram_safety_floor_gb", 4.0))
     needed = new_size_gb + kv_margin
     evicted: list[str] = []
 
-    while True:
-        state = validate_state()
-        reserved = _reserved_gb(state, kv_margin)
-        if reserved + needed <= budget:
-            return evicted
-
+    def _try_evict(reason: str, detail: str) -> bool:
+        """Pick the LRU non-resident victim and stop it. Returns True if
+        we evicted something, False if there's no candidate (caller
+        should raise BUDGET_EXCEEDED)."""
         running = state.get("backends") or {}
-        # Eviction candidate set: running + non-resident + not the target.
-        # (A pending start for `instance_id` isn't in running yet, so the
-        # target is implicitly excluded.)
         candidates = {
             k: v for k, v in running.items()
             if not v.get("resident") and k != instance_id
         }
         if not candidates:
             raise BackendError(
-                f"Budget exceeded: would reserve {reserved + needed:.1f} GB but "
-                f"limit is {budget:.1f} GB, and all running instances are "
+                f"{reason}: {detail} and all running instances are "
                 f"resident-pinned (nothing to evict).",
                 code="BUDGET_EXCEEDED",
             )
-
-        # LRU: oldest last_used (fall back to start_time).
         def _lru_key(k: str) -> str:
             v = candidates[k]
             return v.get("last_used") or v.get("start_time") or ""
-
         victim = min(candidates.keys(), key=_lru_key)
-        print(f"  LRU eviction: stopping {victim} to make room for {instance_id}")
+        print(f"  LRU eviction ({reason}): stopping {victim} to make room for {instance_id}")
         stop_backend(instance_id=victim)
         evicted.append(victim)
+        return True
+
+    # Gate 1: static budget — loop with eviction.
+    while True:
+        state = validate_state()
+        reserved = _reserved_gb(state, kv_margin)
+        if reserved + needed <= budget:
+            break
+        _try_evict(
+            "Budget exceeded",
+            f"would reserve {reserved + needed:.1f} GB but limit is {budget:.1f} GB",
+        )
+
+    # Gate 2: live RAM — also loops with eviction in case freeing a
+    # sibling actually returns memory to the OS. Skip when needed is 0
+    # (couldn't size the model — we'd false-fail every admission).
+    if needed > 0 and floor > 0:
+        while True:
+            avail = _live_mem_available_gb()
+            if avail == 0.0:
+                # Couldn't read meminfo. Don't block on a measurement
+                # we can't trust; admission falls back to static budget.
+                break
+            # The new instance will eat `new_size_gb` of MemAvailable at
+            # load time; we need `floor` left over after that.
+            if avail >= new_size_gb + floor:
+                break
+            try:
+                _try_evict(
+                    "RAM floor",
+                    f"only {avail:.1f} GB MemAvailable; need {new_size_gb + floor:.1f} GB "
+                    f"({new_size_gb:.1f} for the new instance + {floor:.1f} GB safety floor)",
+                )
+            except BackendError as e:
+                # Re-raise with a code the caller can render distinctly.
+                raise BackendError(str(e), code="RAM_FLOOR")
+            state = validate_state()  # refresh after eviction
+
+    return evicted
 
 
 def ensure_backend(
@@ -1111,13 +1412,24 @@ def ensure_backend(
     wait: bool = False,
     schedule_start: "callable | None" = None,
     resident: bool | None = None,
+    skip_leftover_check: bool = False,
 ) -> dict:
     """Make sure the (backend, model) instance is running. Idempotent.
 
     Return shape:
         {"status": "ready"|"loading",
          "instance_id": ..., "port": int|None, "base_url": str|None,
-         "model": ..., "backend": ..., "evicted": [instance_id, ...]}
+         "model": ..., "backend": ..., "evicted": [instance_id, ...],
+         "max_model_len": int|None, "output_reserve": int}
+
+    `max_model_len` is the model's input window in tokens, parsed from
+    `--max-model-len` in the model's `backend_args`. None when the backend
+    doesn't declare one (e.g. ollama, llama.cpp without an override) — the
+    client should fall back to a conservative default.
+
+    `output_reserve` is a flat per-request reservation for output tokens
+    (default 4096); clients use it to compute "how much input fits" as
+    `max_model_len - output_reserve - client_overhead`.
 
     `ready` means a state entry exists AND its health endpoint responds
     200. `loading` means either a state entry exists but isn't yet
@@ -1155,7 +1467,30 @@ def ensure_backend(
         )
     backend = config.get_backend(resolved_backend)
     instance_id = compute_instance_id(resolved_backend, model_name)
-    size_gb = float(model.size_gb or 0)
+    size_gb = compute_effective_size_gb(model)
+
+    # Survey for leftover state from a previous run BEFORE the lock — this
+    # raises before we account against the budget, so a stale entry doesn't
+    # also trip eviction. Skip when the caller has already handled it
+    # (e.g. _auto_start_resident_set runs one survey at the top).
+    if not skip_leftover_check:
+        target_port = backend.port
+        from src.preflight import survey_leftovers
+        findings = survey_leftovers(target_ports=[target_port] if target_port else None)
+        # Filter out a stale entry for this exact instance — start_backend
+        # already calls stop_backend for that, and the user shouldn't be
+        # asked to confirm before idempotently retrying their own start.
+        findings = [f for f in findings
+                    if not (f["kind"] == "stale_state"
+                            and f.get("action", {}).get("instance_id") == instance_id)]
+        if findings:
+            raise LeftoversFound(findings)
+    # Surface the model's input window so clients can size their requests
+    # accordingly (e.g. opencode's `limit.context` field). None when the
+    # backend doesn't declare one — clients should fall back to a conservative
+    # default rather than assuming a window.
+    max_model_len = _parse_max_model_len(model.backend_args or "")
+    output_reserve = _DEFAULT_OUTPUT_RESERVE
 
     # Resolve resident flag: explicit wins; None → look at config.resident.
     if resident is None:
@@ -1179,6 +1514,8 @@ def ensure_backend(
                 "model": model_name,
                 "backend": resolved_backend,
                 "evicted": [],
+                "max_model_len": max_model_len,
+                "output_reserve": output_reserve,
             }
 
         if instance_id in _starting_instances:
@@ -1191,6 +1528,8 @@ def ensure_backend(
                 "model": model_name,
                 "backend": resolved_backend,
                 "evicted": [],
+                "max_model_len": max_model_len,
+                "output_reserve": output_reserve,
             }
 
         # Admission: evict LRU non-residents until we fit, or raise.
@@ -1210,6 +1549,7 @@ def ensure_backend(
             start_backend(
                 model_name, resolved_backend, config, repo_root,
                 resident=resident,
+                skip_leftover_check=True,
             )
         finally:
             with _ensure_lock:
@@ -1222,6 +1562,7 @@ def ensure_backend(
             start_backend(
                 model_name, resolved_backend, config, repo_root,
                 resident=resident,
+                skip_leftover_check=True,
             )
         finally:
             with _ensure_lock:
@@ -1241,6 +1582,8 @@ def ensure_backend(
             "model": model_name,
             "backend": resolved_backend,
             "evicted": evicted,
+            "max_model_len": max_model_len,
+            "output_reserve": output_reserve,
         }
 
     # wait=False: schedule the start and return 'loading' immediately.
@@ -1253,6 +1596,8 @@ def ensure_backend(
         "model": model_name,
         "backend": resolved_backend,
         "evicted": evicted,
+        "max_model_len": max_model_len,
+        "output_reserve": output_reserve,
     }
 
 

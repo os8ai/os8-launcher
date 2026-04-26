@@ -55,3 +55,33 @@ def clear_port_override(name: str):
         del overrides[name]
         data["port_overrides"] = overrides
         _save(data)
+
+
+# --- role selections -----------------------------------------------------
+# Persists which option the user picked for a multi-option role (currently
+# just `chat`). Keyed by role name; value is a model name from the role's
+# `options:` list in config.yaml. Resolved by config.py::resolve_role; the
+# launcher dashboard writes this via /api/triplet/role.
+
+def get_role_selection(role: str) -> str | None:
+    data = _load()
+    sel = data.get("role_selections") or {}
+    val = sel.get(role)
+    return str(val) if val else None
+
+
+def set_role_selection(role: str, model: str):
+    data = _load()
+    sel = data.get("role_selections") or {}
+    sel[role] = str(model)
+    data["role_selections"] = sel
+    _save(data)
+
+
+def clear_role_selection(role: str):
+    data = _load()
+    sel = data.get("role_selections") or {}
+    if role in sel:
+        del sel[role]
+        data["role_selections"] = sel
+        _save(data)

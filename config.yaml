@@ -210,14 +210,46 @@ models:
     downloaded: false
     size_gb: 36
     backend_env: {}
-    # gpu-memory-utilization 0.60 (not vLLM's default 0.90): the Spark's 122 GB
-    # unified memory is shared among qwen3.6 + Kontext (ComfyUI, ~18 GB) + Kokoro
-    # (~2 GB w/ PyTorch overhead). At 0.80 vLLM reserves ~97 GB and Kokoro OOMs
-    # on load. 0.60 reserves ~73 GB for vLLM — still ample for the 36 GB model
-    # with a generous KV cache — and leaves ~49 GB for the other two residents
-    # with headroom. Bump up if Qwen drops long-context turns off the KV cache
-    # on your workload.
-    backend_args: "--max-model-len 65536 --gpu-memory-utilization 0.60 --tensor-parallel-size 1 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --allowed-origins '[\"*\"]' --speculative-config '{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}'"
+    # gpu-memory-utilization 0.40 — the Spark's 122 GB unified memory is shared
+    # among qwen3.6 + Kontext (ComfyUI, ~18 GB at startup but spikes higher
+    # during text-encoder + VAE init) + Kokoro (~2 GB) + OS overhead. At 0.60
+    # vLLM grabs ~73 GB up front, MemAvailable drops to ~32 GB, and ComfyUI
+    # OOMs at `cudaMemGetInfo` before it even loads weights. 0.40 reserves
+    # ~49 GB — comfortable for the 36 GB FP8 weights with ~13 GB of KV — and
+    # leaves enough breathing room for the other two residents.
+    #
+    # If you only run qwen3.6 (no triplet), bump back up to 0.80 for a much
+    # larger KV cache. The launcher's admission accounting (effective_size_gb
+    # derived from this fraction) will keep the budget honest either way.
+    backend_args: "--max-model-len 65536 --gpu-memory-utilization 0.40 --tensor-parallel-size 1 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --allowed-origins '[\"*\"]' --speculative-config '{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}'"
+
+  # --- chat (alt): AEON-7's NVFP4 quant of Gemma 4 26B-A4B, MoE, uncensored ---
+  # Same Spark-tuned NVFP4 family as gemma-4-31B-it-nvfp4 but smaller and
+  # faster (3.8B active params, ~16 GB on disk, 45+ tok/s single-stream on
+  # GB10).  Text-only (no vision); supports tool-calling via `gemma4` parser.
+  # Surfaced as the second option for `roles.chat` so users can swap from
+  # Qwen3.6-35B without editing config.  See web/triplet.html chooser.
+  # The model is uncensored — same liability profile as the upstream HF repo.
+  aeon-7-gemma-4-26b:
+    source: AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4
+    path: models/aeon-7-gemma-4-26b/weights
+    format: nvfp4
+    backends: [vllm]
+    default_backend: vllm
+    # Custom image — wraps os8-vllm:gemma4 with an entrypoint that copies
+    # the bundled gemma4_patched.py over vLLM's stock loader before
+    # serving (upstream vLLM hits a KeyError on the AEON-7 NVFP4 weight
+    # layout otherwise). See serving/vllm/Dockerfile.gemma4-aeon.
+    vllm_image: os8-vllm:gemma4-aeon
+    downloaded: false
+    size_gb: 16
+    backend_env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    # gpu-memory-utilization 0.55 keeps headroom for Kontext (~18 GB) +
+    # Kokoro (~2 GB w/ overhead) under the 100 GB triplet budget.  Tool
+    # parser + chunked prefill + prefix caching come straight from the
+    # AEON-7 model card's recommended Spark config.
+    backend_args: "--quantization compressed-tensors --kv-cache-dtype fp8 --enable-chunked-prefill --enable-prefix-caching --max-model-len 65536 --gpu-memory-utilization 0.55 --enable-auto-tool-choice --tool-call-parser gemma4 --allowed-origins '[\"*\"]'"
 
   # --- text-to-speech: Kokoro v1, 82M params, 54 prebuilt voices, 8 languages ---
   # Lightweight TTS with high-quality prebuilt voices.  Served via Kokoro-FastAPI
@@ -292,8 +324,18 @@ resources:
 # a reference image, see LOCAL_MODELS_PLAN.md v2), kokoro-v1 for voice.
 # Swap the model here for a different GPU (e.g. chat → gemma-4-E2B-it
 # on 24 GB cards) without touching the `resident:` list.
+#
+# A role may declare multiple `options:` (chat does, below) — the launcher
+# dashboard renders a chooser, persists the user's selection in
+# ~/.config/os8-launcher/settings.yaml, and resolves at start time via
+# src/config.py::resolve_role.  Single-mapping roles keep the legacy
+# `{model, backend}` shape and parse identically.
 roles:
-  chat:      { model: qwen3-6-35b-a3b,   backend: vllm }
+  chat:
+    options:
+      - { model: qwen3-6-35b-a3b,    backend: vllm, label: "Qwen3.6-35B (vision, default)" }
+      - { model: aeon-7-gemma-4-26b, backend: vllm, label: "AEON-7 Gemma-4-26B (uncensored, fast, text-only)" }
+    default: qwen3-6-35b-a3b
   image-gen: { model: flux1-kontext-dev, backend: comfyui }
   tts:       { model: kokoro-v1,         backend: kokoro }
 
