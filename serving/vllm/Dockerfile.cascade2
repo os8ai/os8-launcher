@@ -1,0 +1,23 @@
+# Thin layer over vLLM cu130-nightly for Nemotron-Cascade 2 30B-A3B.
+#
+# The model (published 2026-03-19) introduces the nemotron_v3 reasoning parser
+# (for <think>/</think> tags). Tool-calling reuses the qwen3_coder parser,
+# which has shipped in vLLM for months. The reasoning parser landed in vLLM
+# 0.17.1 nightlies in late March 2026.
+#
+# Before `docker build`, refresh the base so you get the newest nightly:
+#   docker pull vllm/vllm-openai:cu130-nightly
+#
+# Transformers is upgraded to HEAD in case the model needs processor code that
+# isn't yet in a tagged release — same approach as Dockerfile.qwen36 and
+# Dockerfile.gemma4.
+#
+# Remove this image once a stable cu130-nightly ships nemotron_v3 in a tagged
+# release.
+FROM vllm/vllm-openai:cu130-nightly
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# pandas: cu130-nightly imports pandas unconditionally from vllm/_aiter_ops.py
+# but doesn't ship it — vllm crashes at startup. Same workaround as qwen36.
+# Remove once upstream either makes pandas a hard dep or drops the import.
+RUN pip install --no-cache-dir pandas
+RUN pip install --no-cache-dir -U "git+https://github.com/huggingface/transformers.git"

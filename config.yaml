@@ -209,6 +209,10 @@ models:
     vllm_image: os8-vllm:qwen36
     downloaded: false
     size_gb: 36
+    # Pairs with OpenCode — qwen3_coder tool-call parser is OpenCode's native
+    # protocol. OS8 reads this via /api/triplet/roles and uses it as the
+    # mandatory CLI for chat turns + builds when this model is the chat slot.
+    recommended_client: opencode
     backend_env: {}
     # gpu-memory-utilization 0.40 — the Spark's 122 GB unified memory is shared
     # among qwen3.6 + Kontext (ComfyUI, ~18 GB at startup but spikes higher
@@ -236,6 +240,8 @@ models:
     format: nvfp4
     backends: [vllm]
     default_backend: vllm
+    # Same gemma4 tool-call parser family as Qwen3.6 — OpenCode handles it.
+    recommended_client: opencode
     # Custom image — wraps os8-vllm:gemma4 with an entrypoint that copies
     # the bundled gemma4_patched.py over vLLM's stock loader before
     # serving (upstream vLLM hits a KeyError on the AEON-7 NVFP4 weight
@@ -250,6 +256,58 @@ models:
     # parser + chunked prefill + prefix caching come straight from the
     # AEON-7 model card's recommended Spark config.
     backend_args: "--quantization compressed-tensors --kv-cache-dtype fp8 --enable-chunked-prefill --enable-prefix-caching --max-model-len 65536 --gpu-memory-utilization 0.55 --enable-auto-tool-choice --tool-call-parser gemma4 --allowed-origins '[\"*\"]'"
+
+  # --- chat (alt): NVIDIA Nemotron-Cascade 2 30B-A3B, MoE, math/coding/agentic ---
+  # Released 2026-03-19. 30B MoE / 3B active. Post-trained with Cascade RL.
+  # Gold-medal IMO/IOI/ICPC 2025. Designed for agentic tool use — pairs with
+  # OpenHands as the OS8 client (mirrors how Qwen3.6 pairs with OpenCode).
+  #
+  # NVIDIA hasn't published an official FP8/NVFP4 quant yet, so we use the
+  # community NVFP4 (~21 GB) at chankhavu/...; the recipe matches NVIDIA's
+  # selective NVFP4 from the Nemotron 3 Nano Technical Report.
+  #
+  # vLLM ≥0.17.1 required for the nemotron_v3 reasoning parser. The new image
+  # os8-vllm:cascade2 layers that on top of cu130-nightly. Tool-calling reuses
+  # the qwen3_coder parser (same protocol as our existing Qwen3.6 path).
+  # See serving/vllm/Dockerfile.cascade2 for the image recipe.
+  nemotron-cascade-2:
+    source: chankhavu/Nemotron-Cascade-2-30B-A3B-NVFP4
+    path: models/nemotron-cascade-2/weights
+    format: nvfp4
+    backends: [vllm]
+    default_backend: vllm
+    vllm_image: os8-vllm:cascade2
+    downloaded: false
+    size_gb: 21
+    # Pairs with OpenHands — Cascade-2's <tool_call>/<tool_response> protocol
+    # is what OpenHands speaks via LiteLLM's openai/ provider. OpenCode would
+    # silently produce broken tool calls with this model, so OS8 hard-pins
+    # to OpenHands when this is the chat slot.
+    recommended_client: openhands
+    backend_env:
+      VLLM_NVFP4_GEMM_BACKEND: marlin
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    # No --quantization flag: this vLLM nightly cross-checks the CLI value
+    # against config.json's `quantization_config.quant_method` (which is
+    # `modelopt_fp4` for the chankhavu NVFP4 quant), and the only string that
+    # passes the equality check is the literal `modelopt_fp4` — but the CLI
+    # arg parser doesn't accept that as a valid choice. Omitting the flag
+    # lets vLLM auto-detect from the model config and bypasses the assertion.
+    # (gemma-4-31B-it-nvfp4's older recipe used `modelopt`, which still works
+    # for that model because its config.json declares the legacy method name.)
+    #
+    # gpu-memory-utilization 0.40 mirrors qwen3.6 for triplet stacking math.
+    # Cascade-2 supports 262K context but Spark KV ceiling makes 65K a safer
+    # working window. nemotron_v3 reasoning parser handles <think> tags;
+    # qwen3_coder tool-call parser handles <tool_call>/<tool_response>.
+    # Sampling temperature=1.0 top_p=0.95 is the model card's recommendation
+    # but is set per-request, not in backend_args.
+    #
+    # Deliberately omitted (vs. AEON-Gemma): --kv-cache-dtype fp8,
+    # --enable-chunked-prefill, --enable-prefix-caching. Those are
+    # AEON-recipe-specific and not validated for modelopt NVFP4 + nemotron_v3
+    # parser combo. Add back individually once each is confirmed working.
+    backend_args: "--max-model-len 65536 --gpu-memory-utilization 0.40 --reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --allowed-origins '[\"*\"]'"
 
   # --- text-to-speech: Kokoro v1, 82M params, 54 prebuilt voices, 8 languages ---
   # Lightweight TTS with high-quality prebuilt voices.  Served via Kokoro-FastAPI
@@ -335,6 +393,7 @@ roles:
     options:
       - { model: qwen3-6-35b-a3b,    backend: vllm, label: "Qwen3.6-35B (vision, default)" }
       - { model: aeon-7-gemma-4-26b, backend: vllm, label: "AEON-7 Gemma-4-26B (uncensored, fast, text-only)" }
+      - { model: nemotron-cascade-2, backend: vllm, label: "Nemotron-Cascade 2 (math/coding, agentic)" }
     default: qwen3-6-35b-a3b
   image-gen: { model: flux1-kontext-dev, backend: comfyui }
   tts:       { model: kokoro-v1,         backend: kokoro }
@@ -353,6 +412,8 @@ clients:
     manifest: clients/aider/manifest.yaml
   opencode:
     manifest: clients/opencode/manifest.yaml
+  openhands:
+    manifest: clients/openhands/manifest.yaml
   open-webui:
     manifest: clients/open-webui/manifest.yaml
     port: 3000

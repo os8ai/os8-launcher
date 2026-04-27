@@ -772,6 +772,20 @@ def api_triplet_roles():
             None
         )
         running_model = running.get("model") if running else None
+
+        # recommended_client: per-model field declared in config.yaml. OS8 reads
+        # this from the chat slot to hard-pin its CLI runtime — Cascade-2 →
+        # OpenHands, Qwen/AEON → OpenCode. Lookup model -> recommended_client
+        # via config.models so OS8 doesn't have to fetch the full model config.
+        # Falls back to None when the model is missing the field; OS8 then uses
+        # its own historical default ('opencode').
+        rec_source_model = running_model or selected_model
+        rec_client = None
+        if rec_source_model:
+            mc = config.models.get(rec_source_model)
+            if mc is not None:
+                rec_client = getattr(mc, "recommended_client", None)
+
         out[role_name] = {
             "options": [
                 {"model": o.model, "backend": o.backend, "label": o.label}
@@ -783,7 +797,13 @@ def api_triplet_roles():
             "running_model": running_model,
             "running_backend": running.get("name") if running else None,
             "running_health": running.get("health") if running else None,
+            # Port the running instance listens on. OS8 uses this to build
+            # OPENCODE/OPENHANDS env vars (LLM_BASE_URL=http://localhost:{port}/v1)
+            # for terminal-tab sessions without having to cross-reference
+            # /api/status's backends array. None when nothing is running for this role.
+            "running_port": running.get("port") if running else None,
             "needs_apply": bool(running_model and running_model != selected_model),
+            "recommended_client": rec_client,
         }
     return out
 

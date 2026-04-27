@@ -1,0 +1,29 @@
+name: openhands
+install_type: binary
+binary: clients/openhands/bin/openhands
+source: https://install.openhands.dev/install.sh
+# The official installer puts the binary at ~/.local/bin/openhands (not
+# ~/.openhands/bin as I'd initially assumed — that subdir is for runtime
+# config files like agent_settings.json, created lazily on first interactive
+# use). We run the installer and then symlink from the per-client tree to
+# match the convention used by aider/opencode/open-webui.
+install_cmd: "curl -fsSL https://install.openhands.dev/install.sh | sh && mkdir -p clients/openhands/bin && ln -sf $HOME/.local/bin/openhands clients/openhands/bin/openhands"
+update_cmd: "curl -fsSL https://install.openhands.dev/install.sh | sh"
+# --override-with-envs is required for OpenHands to actually READ the LLM_*
+# env vars below. Without the flag, OpenHands defaults to its own
+# ~/.openhands/agent_settings.json (which doesn't exist on first launch),
+# silently ignores LLM_BASE_URL/MODEL/API_KEY, and drops into a setup wizard.
+# This flag is the launcher's contract: env-driven config, not file-based.
+run: "clients/openhands/bin/openhands --override-with-envs"
+# OpenHands uses LiteLLM internally for provider routing, so the model name
+# must be prefixed `openai/<served_model_name>` for it to route through the
+# OpenAI-compatible client to our vLLM endpoint. Unlike opencode, OpenHands
+# has no inline-JSON-config env var; we pass config through env vars and the
+# user must invoke the CLI with `--override-with-envs` (which OS8 does
+# automatically — see src/services/backend-adapter.js BACKENDS.openhands).
+# Template variables {port} and {served_model_name} are filled in at launch
+# by clients.py.
+env:
+  LLM_API_KEY: "dummy"
+  LLM_BASE_URL: "http://localhost:{port}/v1"
+  LLM_MODEL: "openai/{served_model_name}"

@@ -76,6 +76,17 @@
             font-family: inherit;
             width: 100%;
         }
+        .role-recommended-client {
+            grid-column: 1 / -1;
+            margin-top: 0.35rem;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.78rem;
+            color: #9aa9c0;
+        }
+        .role-recommended-client strong {
+            color: #cfd8e3;
+            font-weight: 600;
+        }
         .role-pending {
             grid-column: 1 / -1;
             display: flex;
@@ -364,12 +375,20 @@
                     centerCol = `<span class="role-model">${selectedModel} ${sizeText}</span>`;
                 }
 
+                // For chat slot, surface the recommended_client coupling so users
+                // see which CLI OS8 will use with the current chat model. Read-only —
+                // changing the client requires changing the chat model.
+                const recClientLine = (role === 'chat' && rd?.recommended_client)
+                    ? `<div class="role-recommended-client">Client: <strong>${escapeAttr(rd.recommended_client)}</strong> · launches automatically with this model.</div>`
+                    : '';
+
                 rows.push(`
                     <div class="role-row">
                         <span class="role-name">${role}</span>
                         ${centerCol}
                         ${urlLine}
                         <span class="role-state state-${state}">${stateLabel}</span>
+                        ${recClientLine}
                         ${renderPendingBanner(role, rd)}
                     </div>
                 `);

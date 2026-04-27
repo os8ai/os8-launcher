@@ -255,6 +255,7 @@ _MODEL_ELIGIBILITY: dict[str, list[str]] = {
     "flux1-kontext-dev": ["image-edit"],
     "qwen3-6-35b-a3b": ["conversation", "vision"],
     "aeon-7-gemma-4-26b": ["conversation", "summary", "planning", "coding", "jobs"],
+    "nemotron-cascade-2": ["conversation", "summary", "planning", "coding", "jobs"],
 }
 
 

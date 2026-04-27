@@ -56,6 +56,12 @@ class ModelConfig:
     # from the BFL repo. All three land in the one weights dir so the
     # ComfyUI bind-mount sees them under a single model name.
     extra_sources: list[dict] = field(default_factory=list)
+    # Client this model is hard-paired with (chat-role models only). OS8 reads
+    # this via /api/triplet/roles to pick its CLI runtime — Cascade-2 →
+    # OpenHands, Qwen/AEON → OpenCode. Tool-call protocols differ enough
+    # between models that mixing the wrong client silently breaks tool use,
+    # so this is treated as authoritative on the OS8 side.
+    recommended_client: str | None = None
 
 
 @dataclass
@@ -251,6 +257,7 @@ def _parse_models(raw: dict) -> dict[str, ModelConfig]:
             backend_args=data.get("backend_args", ""),
             allow_patterns=data.get("allow_patterns"),
             extra_sources=data.get("extra_sources") or [],
+            recommended_client=data.get("recommended_client"),
         )
     return models
 

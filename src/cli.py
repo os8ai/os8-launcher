@@ -269,9 +269,29 @@ def main(repo_root: Path):
     # --- serve ---
     if handler == "serve":
         from src.backends import BackendError, LeftoversFound, act_on_leftover
-        from src.clients import ClientError
+        from src.clients import ClientError, is_client_installed
         from src.preflight import format_findings
         from src.runtime import serve_combo
+
+        def _nudge_recommended_client(model_name: str, cfg) -> None:
+            """If the served model declares a recommended_client and that
+            client's on-disk artifact is missing, print a one-line nudge.
+            Skipped silently when the user already passed --client (they're
+            picking explicitly) or when the recommended client is installed.
+            """
+            if getattr(args, "client", None):
+                return
+            mc = cfg.models.get(model_name)
+            rec = getattr(mc, "recommended_client", None) if mc else None
+            if not rec:
+                return
+            if is_client_installed(rec, cfg, repo_root):
+                return
+            print()
+            print(f"  Recommended client '{rec}' is not installed yet.")
+            print(f"  Install it with: ./launcher setup {rec}")
+            print(f"  Then launch with: ./launcher client {rec} --model {model_name}")
+
         try:
             config = load_config(repo_root)
             # Validate model/backend/client up front so we fail fast with a
@@ -289,6 +309,7 @@ def main(repo_root: Path):
                     config,
                     repo_root,
                 )
+                _nudge_recommended_client(args.model, config)
             except LeftoversFound as e:
                 # Show findings, ask once, then either stop them and retry
                 # or bail out. Foreign-origin items get a louder warning.
@@ -325,6 +346,7 @@ def main(repo_root: Path):
                     config,
                     repo_root,
                 )
+                _nudge_recommended_client(args.model, config)
         except (ConfigError, BackendError, ClientError, KeyboardInterrupt) as e:
             if isinstance(e, KeyboardInterrupt):
                 print("\nAborted.")

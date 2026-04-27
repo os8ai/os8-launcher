@@ -53,6 +53,42 @@ class ClientError(Exception):
     """Raised when a client operation fails."""
 
 
+def is_client_installed(client_name: str, config, repo_root: Path) -> bool:
+    """Check whether a client's setup has produced its on-disk artifact.
+
+    Used by `./launcher serve` to decide whether to nudge the user toward
+    `./launcher setup <client>` after a backend goes healthy. Pure check —
+    no side effects, no network. Returns False when the client is unknown
+    or the manifest can't be loaded (treat as "not ready").
+
+    Cases:
+      - install_type == 'binary' → the binary at manifest.binary exists
+      - install_type == 'pip'    → the venv at manifest.venv exists
+      - install_type == 'container' → always True (image pulls at run time)
+      - anything else            → True (defensive: don't nudge for clients
+        whose install state we can't introspect)
+    """
+    try:
+        client = config.clients.get(client_name)
+        if not client or not client.manifest:
+            return False
+        manifest = client.manifest
+        if manifest.install_type == "binary":
+            binary_rel = manifest.fields.get("binary")
+            if not binary_rel:
+                return False
+            return (repo_root / binary_rel).exists()
+        if manifest.install_type == "pip":
+            venv_rel = manifest.fields.get("venv")
+            if not venv_rel:
+                return True   # pip-without-venv (system pip install) — assume present
+            return (repo_root / venv_rel).exists()
+        # container, bridge, unknown → no on-disk gate worth checking here.
+        return True
+    except Exception:
+        return False
+
+
 def _get_running_backend(state: dict) -> dict:
     """Get a running backend from state, or raise.
 
